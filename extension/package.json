@@ -15,5 +15,8 @@
   "devDependencies": {
     "typescript": "^5.9.0",
     "wxt": "^0.20.0"
+  },
+  "dependencies": {
+    "single-file-core": "^1.5.84"
   }
 }

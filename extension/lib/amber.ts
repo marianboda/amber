@@ -51,6 +51,21 @@ export async function saveBookmark(args: SaveArgs): Promise<SaveResult> {
   return res.json();
 }
 
+// Upload a self-contained page snapshot captured in the tab. Best-effort:
+// the bookmark exists either way; the archive just makes it permanent.
+export async function uploadArchive(id: string, html: string): Promise<void> {
+  const settings = await getSettings();
+  const res = await fetch(`${settings.serverUrl}/api/bookmarks/${id}/archive`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "text/html",
+      Authorization: `Bearer ${settings.token}`,
+    },
+    body: html,
+  });
+  if (!res.ok) throw new Error(`archive upload HTTP ${res.status}`);
+}
+
 // Poll enrichment status ~2s until done; give up silently after ~10s (design §6.1).
 export async function waitForGist(id: string): Promise<string | null> {
   const settings = await getSettings();

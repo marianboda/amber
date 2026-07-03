@@ -40,6 +40,15 @@
     await api.remove(bookmark.id);
     removeBookmark(bookmark.id);
   }
+  async function openArchive() {
+    if (!bookmark) return;
+    const res = await fetch(`/api/bookmarks/${bookmark.id}/archive`, {
+      headers: { Authorization: `Bearer ${localStorage.getItem("amber_token") ?? ""}` },
+    });
+    if (!res.ok) return;
+    const blob = await res.blob();
+    window.open(URL.createObjectURL(blob), "_blank");
+  }
 </script>
 
 {#if bookmark}
@@ -80,6 +89,9 @@
 
     <div class="actions">
       <a class="btn" href={bookmark.url} target="_blank" rel="noopener">Open original ↗</a>
+      {#if bookmark.archive_ref}
+        <button class="btn" onclick={openArchive}>Archived copy 🗂</button>
+      {/if}
       <button class="btn danger" onclick={del}>Delete</button>
     </div>
   </aside>

@@ -1,4 +1,4 @@
-import { saveBookmark, waitForGist, type SaveArgs } from "../lib/amber";
+import { saveBookmark, waitForGist, uploadArchive, type SaveArgs } from "../lib/amber";
 
 export default defineBackground(() => {
   // Firefox MV2 exposes browserAction instead of action.
@@ -16,7 +16,14 @@ export default defineBackground(() => {
   action.onClicked.addListener(async (tab) => {
     if (!tab?.id || !tab.url || !/^https?:/.test(tab.url)) return;
     const note = await getSelection(tab.id);
-    await save(tab.id, { url: tab.url, note: note || undefined, saved_from: "extension" });
+    const saved = await save(tab.id, {
+      url: tab.url,
+      note: note || undefined,
+      saved_from: "extension",
+    });
+    // Archive the rendered page (assets inlined) — works behind logins and
+    // survives dead URLs. Runs after the save toast; best-effort.
+    if (saved) await captureAndUpload(tab.id, saved);
   });
 
   // Right-click a link → save that link, current page recorded as referrer.
@@ -25,16 +32,33 @@ export default defineBackground(() => {
     await save(tab.id, { url: info.linkUrl, referrer: tab.url, saved_from: "context_menu" });
   });
 
-  async function save(tabId: number, args: SaveArgs) {
+  async function save(tabId: number, args: SaveArgs): Promise<string | null> {
     try {
       const result = await saveBookmark(args);
       await toast(tabId, result.duplicate ? "Already in Amber" : "Saved ✓", "ok");
       if (!result.duplicate) {
-        const gist = await waitForGist(result.id);
-        if (gist) await toast(tabId, gist, "gist");
+        waitForGist(result.id).then((gist) => {
+          if (gist) toast(tabId, gist, "gist");
+        });
       }
+      return result.id;
     } catch (err: any) {
       await toast(tabId, `Amber: ${err.message}`, "error");
+      return null;
+    }
+  }
+
+  async function captureAndUpload(tabId: number, bookmarkId: string) {
+    try {
+      await browser.scripting.executeScript({ target: { tabId }, files: ["/capture.js"] });
+      const [result] = await browser.scripting.executeScript({
+        target: { tabId },
+        func: () => (globalThis as any).__amberCapture(),
+      });
+      const html = result?.result as string | undefined;
+      if (html) await uploadArchive(bookmarkId, html);
+    } catch {
+      // Archive is best-effort; the bookmark itself already saved.
     }
   }
 

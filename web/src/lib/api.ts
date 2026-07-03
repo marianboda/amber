@@ -26,6 +26,7 @@ export interface Bookmark {
   source_detail: string | null;
   enrich_status: "pending" | "done" | "failed";
   fetch_status: "pending" | "ok" | "dead";
+  archive_ref: string | null;
   topics: Topic[];
 }
 

@@ -31,7 +31,7 @@ const api = new Hono();
 api.use("*", bearerAuth(config.authToken));
 
 api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));
-api.route("/bookmarks", bookmarkRoutes(db));
+api.route("/bookmarks", bookmarkRoutes(db, config));
 api.route("/topics", topicRoutes(db));
 api.route("/import", importRoutes(db));
 api.route("/export", exportRoutes(db));

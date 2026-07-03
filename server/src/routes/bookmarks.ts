@@ -1,13 +1,16 @@
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { canonicalize, domainOf } from "../canonical.js";
 import { enqueueJob } from "../jobs.js";
+import type { Config } from "../config.js";
 import { ensureUnsortedTopic, topicsForBookmark, setBookmarkTopics } from "./topics.js";
 
 const SAVED_FROM = new Set(["extension", "share_sheet", "context_menu", "import", "api"]);
 
-export function bookmarkRoutes(db: Database.Database): Hono {
+export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
   const app = new Hono();
 
   app.post("/", async (c) => {
@@ -152,6 +155,36 @@ export function bookmarkRoutes(db: Database.Database): Hono {
     const result = db.prepare("DELETE FROM bookmarks WHERE id = ?").run(c.req.param("id"));
     if (result.changes === 0) return c.json({ error: "not found" }, 404);
     return c.json({ ok: true });
+  });
+
+  // Client-captured page snapshot (self-contained HTML from the extension).
+  // Solves auth-walled and short-lived URLs: the server stores what the user's
+  // logged-in tab actually rendered, then re-extracts from that copy.
+  app.put("/:id/archive", async (c) => {
+    const id = c.req.param("id");
+    const exists = db.prepare("SELECT id FROM bookmarks WHERE id = ?").get(id);
+    if (!exists) return c.json({ error: "not found" }, 404);
+    const html = await c.req.text();
+    if (!html || html.length < 100) return c.json({ error: "empty archive" }, 400);
+    const dir = path.join(config.dataDir, "archives");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${id}.html`), html);
+    db.prepare(
+      "UPDATE bookmarks SET archive_ref = ?, fetch_status = 'ok', enrich_status = 'pending' WHERE id = ?"
+    ).run(`archives/${id}.html`, id);
+    enqueueJob(db, "enrich", { bookmark_id: id }); // re-extract from the snapshot
+    return c.json({ ok: true, bytes: html.length });
+  });
+
+  app.get("/:id/archive", (c) => {
+    const row = db.prepare("SELECT archive_ref FROM bookmarks WHERE id = ?").get(c.req.param("id")) as
+      | { archive_ref: string | null }
+      | undefined;
+    if (!row?.archive_ref) return c.json({ error: "no archive" }, 404);
+    const file = path.join(config.dataDir, row.archive_ref);
+    if (!fs.existsSync(file)) return c.json({ error: "archive file missing" }, 404);
+    c.header("Content-Type", "text/html; charset=utf-8");
+    return c.body(fs.readFileSync(file));
   });
 
   app.post("/:id/retry", (c) => {

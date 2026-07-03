@@ -1,10 +1,21 @@
 import type Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
 import type { Config } from "../config.js";
 import { canonicalize, domainOf } from "../canonical.js";
 import { fetchPage } from "./fetcher.js";
 import { extractPage } from "./extract.js";
 import { enrichWithLLM, type Enrichment } from "./llm.js";
 import { isYouTube, fetchOEmbed, enrichYouTubeWithGemini } from "./youtube.js";
+
+function readArchive(dataDir: string, archiveRef: string | null): string | null {
+  if (!archiveRef) return null;
+  try {
+    return fs.readFileSync(path.join(dataDir, archiveRef), "utf8");
+  } catch {
+    return null;
+  }
+}
 
 function vocabulary(db: Database.Database): string[] {
   return (db.prepare("SELECT name FROM topics").all() as { name: string }[]).map((r) => r.name);
@@ -75,6 +86,19 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
   } else {
     let title: string | null = bookmark.title;
     let text: string | null = null;
+    const archived = readArchive(config.dataDir, bookmark.archive_ref);
+    if (archived) {
+      // Client-captured snapshot wins: it's what the user actually saw,
+      // works for auth-walled pages, and needs no network.
+      const extracted = await extractPage(archived, bookmark.url);
+      title = extracted.title ?? title;
+      text = extracted.text ?? extracted.description;
+      db.prepare(
+        `UPDATE bookmarks SET title = ?, favicon_url = COALESCE(favicon_url, ?),
+         og_image_url = COALESCE(og_image_url, ?), content_text = ?, fetch_status = 'ok'
+         WHERE id = ?`
+      ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
+    } else
     try {
       const page = await fetchPage(bookmark.url);
 
