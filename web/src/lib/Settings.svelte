@@ -142,9 +142,10 @@
   <section>
     <h2>LLM</h2>
     <p class="muted">
-      Configured server-side via environment: <code>AMBER_LLM_PROVIDER</code>,
-      <code>AMBER_LLM_MODEL</code>, <code>AMBER_LLM_API_KEY</code>, <code>AMBER_LLM_BASE_URL</code>,
-      <code>GEMINI_API_KEY</code> (YouTube).
+      Configured server-side: set <code>OPENAI_API_KEY</code> or <code>GEMINI_API_KEY</code>
+      (provider auto-detected; no key → local Ollama). Optional overrides:
+      <code>AMBER_LLM_PROVIDER</code>, <code>AMBER_LLM_MODEL</code>, <code>AMBER_LLM_BASE_URL</code>.
+      <code>GEMINI_API_KEY</code> also enables YouTube video summaries.
     </p>
   </section>
 
