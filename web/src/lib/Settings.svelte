@@ -31,6 +31,54 @@
     }
   }
 
+  let importJob = $state("");
+  let importMsg = $state("");
+  let importProgress = $state<{ total: number; imported: number; duplicates: number; invalid: number } | null>(null);
+  let enrichCounts = $state<Record<string, number> | null>(null);
+
+  async function onFile(e: Event) {
+    const input = e.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    importMsg = "uploading…";
+    try {
+      const res = await api.importFile(file);
+      importJob = res.job_id;
+      importMsg = `${res.count} bookmarks queued`;
+      pollImport();
+    } catch (err: any) {
+      importMsg = `error: ${err.message}`;
+    } finally {
+      input.value = "";
+    }
+  }
+
+  async function pollImport() {
+    while (importJob) {
+      try {
+        const s = await api.importStatus(importJob);
+        importProgress = s.progress;
+        enrichCounts = s.enrichment;
+        if (s.status === "failed") {
+          importMsg = `import failed: ${s.error}`;
+          importJob = "";
+          break;
+        }
+        const enrichDone =
+          s.status === "done" && (s.enrichment.pending ?? 0) === 0;
+        if (enrichDone) {
+          importMsg = "import + enrichment complete ✓";
+          importJob = "";
+          reload();
+          break;
+        }
+      } catch {
+        /* transient */
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+
   async function download(format: "json" | "html") {
     const res = await fetch(api.exportUrl(format), {
       headers: { Authorization: `Bearer ${getToken()}` },
@@ -68,7 +116,19 @@
 
   <section>
     <h2>Import</h2>
-    <p class="muted">Netscape bookmark HTML / CSV import — coming in the next build phase.</p>
+    <p class="muted">Netscape bookmark HTML (Chrome/Firefox/Safari export) or a plain URL / CSV list.</p>
+    <div class="row">
+      <input type="file" accept=".html,.htm,.csv,.txt" onchange={onFile} disabled={!!importJob} />
+    </div>
+    {#if importMsg}<p class="muted">{importMsg}</p>{/if}
+    {#if importProgress}
+      <progress max={importProgress.total} value={importProgress.imported + importProgress.duplicates + importProgress.invalid}></progress>
+      <p class="muted">
+        {importProgress.imported} imported · {importProgress.duplicates} duplicates ·
+        {importProgress.invalid} invalid
+        {#if enrichCounts}· enrichment: {enrichCounts.done ?? 0} done, {enrichCounts.pending ?? 0} pending{/if}
+      </p>
+    {/if}
   </section>
 
   <section>

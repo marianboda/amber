@@ -37,13 +37,13 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [x] Settings page: token connect + quick-save, LLM env reference, export downloads, import placeholder
 
 ## Phase 4 — Import / Export
-- [ ] Netscape bookmark HTML parser (Chrome/Firefox/Safari exports) + CSV/URL-list fallback
-- [ ] `POST /import` → throttled background batch through the standard pipeline; `GET /import/:job_id` progress
-- [ ] Preserve `ADD_DATE` as `saved_at`; `saved_from=import`; folder path stored as classification hint (unused until vocab)
-- [ ] Cross-source dedup at import (first seen wins, earliest date)
-- [ ] Import progress UI
-- [ ] `GET /export?format=json` (full fidelity) + `format=html` (Netscape)
-- [ ] **Milestone: import real bookmark corpus** — v1 becomes daily-usable here (save via curl/bookmarklet)
+- [x] Netscape bookmark HTML parser (Chrome/Firefox/Safari exports) + CSV/URL-list fallback
+- [x] `POST /import` → throttled background batch through the standard pipeline; `GET /import/:job_id` progress
+- [x] Preserve `ADD_DATE` as `saved_at`; `saved_from=import`; folder path stored as classification hint (unused until vocab)
+- [x] Cross-source dedup at import (first seen wins, earliest date)
+- [x] Import progress UI
+- [x] `GET /export?format=json` (full fidelity) + `format=html` (Netscape)
+- [ ] **Milestone: import real bookmark corpus** — v1 becomes daily-usable here *(your move: export bookmarks from Chrome, upload in Settings → Import; needs a real LLM key configured)*
 
 ## Phase 5 — Topic vocabulary  *(decision deferred — do after real corpus is in)*
 - [ ] Decide vocabulary approach (candidate: AI-proposes from corpus, user approves — §3 sketch)

@@ -42,7 +42,9 @@ async function request(path: string, init: RequestInit = {}): Promise<any> {
     ...init,
     headers: {
       Authorization: `Bearer ${getToken()}`,
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...(init.body && !(init.body instanceof FormData)
+        ? { "Content-Type": "application/json" }
+        : {}),
       ...init.headers,
     },
   });
@@ -80,4 +82,19 @@ export const api = {
     }),
   topics: () => request("/topics") as Promise<{ topics: Topic[] }>,
   exportUrl: (format: "json" | "html") => `/api/export?format=${format}`,
+  importFile: (file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request("/import", { method: "POST", body: form }) as Promise<{
+      job_id: string;
+      count: number;
+    }>;
+  },
+  importStatus: (jobId: string) =>
+    request(`/import/${jobId}`) as Promise<{
+      status: string;
+      error: string | null;
+      progress: { total: number; imported: number; duplicates: number; invalid: number } | null;
+      enrichment: Record<string, number>;
+    }>,
 };
