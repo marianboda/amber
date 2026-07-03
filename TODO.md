@@ -10,12 +10,12 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [ ] Dokku app created, persistent storage mount for SQLite, deploy hello-world end-to-end — *Dockerfile + DEPLOY.md ready; actual deploy needs your server (see DEPLOY.md)*
 
 ## Phase 1 — Core API
-- [ ] `POST /bookmarks` — insert immediately, enqueue enrichment job, dedup by canonical_url (return existing + `duplicate: true`)
-- [ ] `GET /bookmarks` — reverse-chron, filters `type`, `q` (title+gist+note LIKE), `read`, `before` cursor, `limit`
-- [ ] `GET /bookmarks/:id`, `PATCH` (note, title, is_read, topics), `DELETE`
-- [ ] `GET /bookmarks/:id/status` (for extension toast later)
-- [ ] Topics CRUD endpoints (`GET/POST /topics`, `DELETE /topics/:id` → reassign to `unsorted`)
-- [ ] Smoke test with `curl` — saving works before any UI exists
+- [x] `POST /bookmarks` — insert immediately, enqueue enrichment job, dedup by canonical_url (return existing + `duplicate: true`)
+- [x] `GET /bookmarks` — reverse-chron, filters `type`, `q` (title+gist+note LIKE), `read`, `before` cursor, `limit`
+- [x] `GET /bookmarks/:id`, `PATCH` (note, title, is_read, topics), `DELETE`
+- [x] `GET /bookmarks/:id/status` (for extension toast later)
+- [x] Topics CRUD endpoints (`GET/POST /topics`, `DELETE /topics/:id` → reassign to `unsorted`)
+- [x] Smoke test with `curl` — saving works before any UI exists
 
 ## Phase 2 — Enrichment pipeline
 - [ ] Job queue: p-queue executor over `jobs` table; **on startup re-enqueue all `pending`/`running` jobs**; jobs idempotent

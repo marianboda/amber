@@ -3,6 +3,8 @@ import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.js";
 import { openDb } from "./db.js";
 import { bearerAuth } from "./auth.js";
+import { bookmarkRoutes } from "./routes/bookmarks.js";
+import { topicRoutes } from "./routes/topics.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
@@ -15,6 +17,8 @@ const api = new Hono();
 api.use("*", bearerAuth(config.authToken));
 
 api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));
+api.route("/bookmarks", bookmarkRoutes(db));
+api.route("/topics", topicRoutes(db));
 
 app.route("/api", api);
 
