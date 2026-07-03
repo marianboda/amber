@@ -54,6 +54,12 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
     } else {
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
     }
+    if (config.llm.provider === "none") {
+      db.prepare(
+        "UPDATE bookmarks SET content_type = 'video', enrich_status = 'done' WHERE id = ?"
+      ).run(bookmarkId);
+      return;
+    }
     enrichment = await enrichYouTubeWithGemini(config, bookmark.url, topicNames);
     if (!enrichment) {
       // No Gemini key: classify from oEmbed metadata via the standard LLM.
@@ -103,6 +109,10 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
     }
 
+    if (config.llm.provider === "none") {
+      db.prepare("UPDATE bookmarks SET enrich_status = 'done' WHERE id = ?").run(bookmarkId);
+      return;
+    }
     enrichment = await enrichWithLLM(config.llm, {
       title,
       url: bookmark.url,

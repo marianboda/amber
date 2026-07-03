@@ -20,6 +20,7 @@ const PROVIDER_DEFAULTS: Record<string, { keyVar: string; model: string }> = {
   openai: { keyVar: "OPENAI_API_KEY", model: "gpt-4o-mini" },
   gemini: { keyVar: "GEMINI_API_KEY", model: "gemini-2.0-flash" },
   ollama: { keyVar: "", model: "llama3.1" },
+  none: { keyVar: "", model: "" },
 };
 
 // Provider comes from AMBER_LLM_PROVIDER, or is inferred from which standard
@@ -29,7 +30,8 @@ function resolveLlm(): Config["llm"] {
   if (!provider) {
     if (process.env.OPENAI_API_KEY) provider = "openai";
     else if (process.env.GEMINI_API_KEY) provider = "gemini";
-    else provider = "ollama";
+    else if (process.env.AMBER_LLM_BASE_URL) provider = "ollama";
+    else provider = "none"; // metadata-only: fetch/extract run, no gist/summary
   }
   const defaults = PROVIDER_DEFAULTS[provider] ?? PROVIDER_DEFAULTS.openai;
   return {
