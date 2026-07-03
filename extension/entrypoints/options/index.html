@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Amber — Options</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        max-width: 460px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #2c2925;
+      }
+      h1 { font-size: 1.2rem; }
+      label { display: block; font-size: 0.8rem; color: #6f6a60; margin: 0.9rem 0 0.25rem; }
+      input {
+        width: 100%;
+        padding: 0.45rem 0.6rem;
+        border: 1px solid #d8d2c6;
+        border-radius: 7px;
+        font-size: 0.9rem;
+        box-sizing: border-box;
+      }
+      button {
+        margin-top: 1.2rem;
+        padding: 0.5rem 1.2rem;
+        border: none;
+        border-radius: 7px;
+        background: #b5762a;
+        color: #fff;
+        font-size: 0.9rem;
+        cursor: pointer;
+      }
+      #status { margin-left: 0.7rem; font-size: 0.85rem; color: #6f6a60; }
+    </style>
+  </head>
+  <body>
+    <h1>🟠 Amber</h1>
+    <label for="serverUrl">Server URL</label>
+    <input id="serverUrl" type="url" placeholder="https://amber.example.com" />
+    <label for="token">API token</label>
+    <input id="token" type="password" placeholder="bearer token" />
+    <label for="device">Device name (optional)</label>
+    <input id="device" type="text" placeholder="MacBook" />
+    <button id="save">Save &amp; test</button><span id="status"></span>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

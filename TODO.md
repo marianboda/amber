@@ -52,12 +52,13 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [ ] UI: topic chips on cards, topic filter row with counts, chip-picker editor in detail panel
 
 ## Phase 6 — Browser extension (WXT)
-- [ ] WXT scaffold, settings (server URL, token, device name)
-- [ ] Toolbar click + keyboard shortcut: save current tab; selected text → `note`
-- [ ] Context menu "Save to Amber" on links; `referrer` = current page, `saved_from=context_menu`
-- [ ] Toast: "Saved ✓" → swap to gist via status polling (~2s, give up at 10s)
-- [ ] Chrome + Firefox builds tested; Safari via Xcode converter
-- [ ] **Milestone: abandon Chrome bookmark bar — v1 done**
+- [x] WXT scaffold, settings (server URL, token, device name) — options page with save-&-test
+- [x] Toolbar click + keyboard shortcut (Alt+Shift+S): save current tab; selected text → `note`
+- [x] Context menu "Save to Amber" on links; `referrer` = current page, `saved_from=context_menu`
+- [x] Toast: "Saved ✓" → swap to gist via status polling (~2s, give up at 10s); badge fallback on restricted pages
+- [x] Chrome (MV3) + Firefox (MV2) builds pass *(load `.output/chrome-mv3` via chrome://extensions → Load unpacked to test live)*
+- [ ] Safari via Xcode converter — *needs Xcode on your machine: `xcrun safari-web-extension-converter extension/.output/chrome-mv3`*
+- [ ] **Milestone: abandon Chrome bookmark bar — v1 done** *(user: install extension, configure server URL + token)*
 
 ## Phase 7 — iOS / macOS apps
 - [ ] SwiftUI multiplatform scaffold, URLSession API client, token settings
