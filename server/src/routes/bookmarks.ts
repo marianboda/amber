@@ -10,6 +10,14 @@ import { ensureUnsortedTopic, topicsForBookmark, setBookmarkTopics } from "./top
 
 const SAVED_FROM = new Set(["extension", "share_sheet", "context_menu", "import", "api"]);
 
+function scrubScripts(html: string): string {
+  return html
+    .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<script\b[^>]*\/?>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+    .replace(/(href|src)\s*=\s*(["']?)\s*javascript:[^"'>\s]*/gi, "$1=$2#");
+}
+
 export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
   const app = new Hono();
 
@@ -168,7 +176,9 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     if (!html || html.length < 100) return c.json({ error: "empty archive" }, 400);
     const dir = path.join(config.dataDir, "archives");
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, `${id}.html`), html);
+    // Defense in depth: the capture already blocks scripts, but archives are
+    // replayed on this origin, so scrub script vectors server-side too.
+    fs.writeFileSync(path.join(dir, `${id}.html`), scrubScripts(html));
     db.prepare(
       "UPDATE bookmarks SET archive_ref = ?, fetch_status = 'ok', enrich_status = 'pending' WHERE id = ?"
     ).run(`archives/${id}.html`, id);
@@ -184,6 +194,8 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     const file = path.join(config.dataDir, row.archive_ref);
     if (!fs.existsSync(file)) return c.json({ error: "archive file missing" }, 404);
     c.header("Content-Type", "text/html; charset=utf-8");
+    // No script execution even if something slipped through the scrubs.
+    c.header("Content-Security-Policy", "sandbox; script-src 'none'");
     return c.body(fs.readFileSync(file));
   });
 
