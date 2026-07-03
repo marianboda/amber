@@ -5,9 +5,15 @@ import { openDb } from "./db.js";
 import { bearerAuth } from "./auth.js";
 import { bookmarkRoutes } from "./routes/bookmarks.js";
 import { topicRoutes } from "./routes/topics.js";
+import { startWorker } from "./queue.js";
+import { enrichBookmark } from "./pipeline/enrich.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
+
+startWorker(db, {
+  enrich: (payload) => enrichBookmark(db, config, payload.bookmark_id),
+});
 
 const app = new Hono();
 

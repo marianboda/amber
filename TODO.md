@@ -18,14 +18,14 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [x] Smoke test with `curl` — saving works before any UI exists
 
 ## Phase 2 — Enrichment pipeline
-- [ ] Job queue: p-queue executor over `jobs` table; **on startup re-enqueue all `pending`/`running` jobs**; jobs idempotent
-- [ ] URL normalization: resolve redirects, strip tracking params → `canonical_url`; post-normalize dedup check
-- [ ] Metadata fetch: title, og:image/title/description, favicon; desktop UA; failure → `fetch_status=dead`, bookmark kept
-- [ ] Text extraction with Defuddle → `content_text`; fallback to og:description when empty
-- [ ] YouTube branch: detect URL, oEmbed for channel/duration, Gemini call with video URL, `content_type=video`
-- [ ] LLM enrichment call: gist + summary + content_type (**no topics — vocabulary TBD**); JSON validation, one retry, then `enrich_status=failed`
-- [ ] Outbound rate limiting (fetches + LLM, few req/s)
-- [ ] Retry endpoint/mechanism for failed enrichment
+- [x] Job queue: p-queue executor over `jobs` table; **on startup re-enqueue all `pending`/`running` jobs**; jobs idempotent
+- [x] URL normalization: resolve redirects, strip tracking params → `canonical_url`; post-normalize dedup check
+- [x] Metadata fetch: title, og:image/title/description, favicon; desktop UA; failure → `fetch_status=dead`, bookmark kept
+- [x] Text extraction with Defuddle → `content_text`; fallback to og:description when empty
+- [x] YouTube branch: detect URL, oEmbed for channel/duration, Gemini call with video URL, `content_type=video` *(Gemini path untested — needs GEMINI_API_KEY; no-key fallback verified)*
+- [x] LLM enrichment call: gist + summary + content_type (**no topics — vocabulary TBD**); JSON validation, one retry, then `enrich_status=failed`
+- [x] Outbound rate limiting (fetches + LLM, few req/s)
+- [x] Retry endpoint/mechanism for failed enrichment (`POST /bookmarks/:id/retry`)
 
 ## Phase 3 — Web UI (Svelte)
 - [ ] Svelte + Vite scaffold in `web/`, built static, served by Hono; token handling
