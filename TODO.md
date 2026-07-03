@@ -28,13 +28,13 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [x] Retry endpoint/mechanism for failed enrichment (`POST /bookmarks/:id/retry`)
 
 ## Phase 3 — Web UI (Svelte)
-- [ ] Svelte + Vite scaffold in `web/`, built static, served by Hono; token handling
-- [ ] Library view: reverse-chron card grid, infinite scroll, compact list toggle
-- [ ] Card: og_image with favicon-on-colored-tile fallback, domain, title, gist, type icon, relative date; click → detail, secondary click → original URL
-- [ ] Pending state: card renders instantly, gist shimmer until enriched; failed → retry glyph
-- [ ] Top bar: search field + content-type filter (topic chips come in phase 5); filters combine
-- [ ] Detail panel: summary, note editor, read-flag toggle, provenance line, delete, open original
-- [ ] Settings page: token/server config, LLM config, import/export entry points
+- [x] Svelte + Vite scaffold in `web/`, built static, served by Hono; token handling
+- [x] Library view: reverse-chron card grid, infinite scroll, compact list toggle
+- [x] Card: og_image with favicon-on-colored-tile fallback, domain, title, gist, type icon, relative date; click → detail, secondary click → original URL
+- [x] Pending state: card renders instantly, gist shimmer until enriched (2s status polling); failed → retry glyph
+- [x] Top bar: search field + content-type filter + topic chips (render once vocab exists); filters combine
+- [x] Detail panel: summary, note editor, read-flag toggle, provenance line, delete, open original
+- [x] Settings page: token connect + quick-save, LLM env reference, export downloads, import placeholder
 
 ## Phase 4 — Import / Export
 - [ ] Netscape bookmark HTML parser (Chrome/Firefox/Safari exports) + CSV/URL-list fallback
