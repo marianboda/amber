@@ -1,3 +1,5 @@
+declare module "single-file-core/single-file-frames.js";
+
 declare module "single-file-core/single-file.js" {
   export function init(initOptions: unknown): void;
   export function getPageData(

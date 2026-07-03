@@ -50,6 +50,10 @@ export default defineBackground(() => {
 
   async function captureAndUpload(tabId: number, bookmarkId: string) {
     try {
+      // Frames listener first (all frames), then the top-frame capturer.
+      await browser.scripting
+        .executeScript({ target: { tabId, allFrames: true }, files: ["/capture-frames.js"] })
+        .catch(() => {}); // cross-origin frame injection can fail; capture still works without
       await browser.scripting.executeScript({ target: { tabId }, files: ["/capture.js"] });
       const [result] = await browser.scripting.executeScript({
         target: { tabId },
