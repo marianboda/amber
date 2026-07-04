@@ -12,7 +12,7 @@ const SAVED_FROM = new Set(["extension", "share_sheet", "context_menu", "import"
 
 // Every whitespace-separated term becomes a quoted prefix token, ANDed:
 // `rust async` → `"rust"* "async"*`. Quoting neutralizes FTS5 operator syntax.
-function ftsQuery(q: string): string | null {
+export function ftsQuery(q: string): string | null {
   const terms = q
     .split(/\s+/)
     .map((t) => t.replace(/"/g, "").trim())
@@ -21,7 +21,7 @@ function ftsQuery(q: string): string | null {
   return terms.map((t) => `"${t}"*`).join(" ");
 }
 
-function scrubScripts(html: string): string {
+export function scrubScripts(html: string): string {
   return html
     .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
     .replace(/<script\b[^>]*\/?>/gi, "")

@@ -66,5 +66,11 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 - [ ] iOS share extension (`saved_from=share_sheet`, source app → `source_detail`)
 - [ ] macOS share extension
 
+## Pulled forward from v2 (done)
+- [x] FTS5 full-text search over title/gist/note/content_text (trigger-synced, prefix matching)
+- [x] Page archival with assets — extension-side single-file capture (works behind auth; server-side Monolith fallback for non-extension saves still open)
+- [x] Test suite: 34 tests (vitest) — canonicalization, parsers, dedup, scrubber, API, archive, queue recovery
+- [x] Bookmarklet (Settings, needs CORS — added)
+
 ## v2 backlog (not now)
-- FTS5 over content_text; page archival (Monolith), reader mode; yt-dlp archiving; "first saved {date}" dedup UX; related items via embeddings
+- Server-side archival fallback (Monolith) for import/API/share-sheet saves; reader mode; yt-dlp archiving; "first saved {date}" dedup UX; related items via embeddings
