@@ -3,7 +3,7 @@ import { api, type Bookmark, type Topic } from "./api";
 export const store = $state({
   bookmarks: [] as Bookmark[],
   topics: [] as Topic[],
-  nextBefore: null as number | null,
+  nextBefore: null as string | null,
   loading: false,
   exhausted: false,
   error: "",

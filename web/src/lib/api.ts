@@ -63,7 +63,7 @@ export const api = {
   list: (params: Record<string, string>) =>
     request(`/bookmarks?${new URLSearchParams(params)}`) as Promise<{
       bookmarks: Bookmark[];
-      next_before: number | null;
+      next_before: string | null;
     }>,
   get: (id: string) => request(`/bookmarks/${id}`) as Promise<Bookmark>,
   status: (id: string) =>

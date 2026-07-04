@@ -19,6 +19,11 @@ function isTrackingParam(name: string): boolean {
 
 export function canonicalize(rawUrl: string): string {
   const u = new URL(rawUrl);
+  // Only web URLs are storable — javascript:/data:/file: would become an XSS
+  // vector the moment the UI renders them as an href or window.open target.
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    throw new Error(`unsupported protocol: ${u.protocol}`);
+  }
   u.hostname = u.hostname.toLowerCase();
   u.hash = "";
   for (const name of [...u.searchParams.keys()]) {

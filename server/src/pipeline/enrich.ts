@@ -118,17 +118,33 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
           .prepare("SELECT id FROM bookmarks WHERE canonical_url = ? AND id != ?")
           .get(finalCanonical, bookmarkId) as { id: string } | undefined;
         if (owner) {
-          // Duplicate discovered post-redirect: first-seen wins, but carry the
-          // new save's note over so user input is never silently dropped.
-          if (bookmark.note) {
+          // Duplicate discovered post-redirect: first-seen wins, but carry all
+          // of the new save's user data over so nothing is silently dropped.
+          const merge = db.transaction(() => {
+            if (bookmark.note) {
+              db.prepare(
+                `UPDATE bookmarks SET note = CASE
+                   WHEN note IS NULL OR note = '' THEN ?
+                   ELSE note || char(10) || char(10) || ?
+                 END WHERE id = ?`
+              ).run(bookmark.note, bookmark.note, owner.id);
+            }
+            if (bookmark.is_read) {
+              db.prepare("UPDATE bookmarks SET is_read = 1 WHERE id = ?").run(owner.id);
+            }
+            if (bookmark.title) {
+              db.prepare(
+                "UPDATE bookmarks SET title = COALESCE(NULLIF(title, ''), ?) WHERE id = ?"
+              ).run(bookmark.title, owner.id);
+            }
+            // Move any user-assigned topics from the doomed row to the survivor.
             db.prepare(
-              `UPDATE bookmarks SET note = CASE
-                 WHEN note IS NULL OR note = '' THEN ?
-                 ELSE note || char(10) || char(10) || ?
-               END WHERE id = ?`
-            ).run(bookmark.note, bookmark.note, owner.id);
-          }
-          db.prepare("DELETE FROM bookmarks WHERE id = ?").run(bookmarkId);
+              `INSERT OR IGNORE INTO bookmark_topics (bookmark_id, topic_id, by_ai)
+               SELECT ?, topic_id, by_ai FROM bookmark_topics WHERE bookmark_id = ? AND by_ai = 0`
+            ).run(owner.id, bookmarkId);
+            db.prepare("DELETE FROM bookmarks WHERE id = ?").run(bookmarkId);
+          });
+          merge();
           return;
         }
         db.prepare("UPDATE bookmarks SET canonical_url = ?, domain = ? WHERE id = ?").run(

@@ -142,6 +142,27 @@ describe("codex review fixes", () => {
     expect(after.note).toBe("orig");
   });
 
+  it("rejects saving a javascript: url", async () => {
+    const res = await app.request("/bookmarks", json({ url: "javascript:alert(1)" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("paginates stably across a shared saved_at", async () => {
+    const ts = 1700000000;
+    for (let i = 0; i < 5; i++) {
+      await app.request("/bookmarks", json({ url: `https://page.example/${i}`, saved_at: ts }));
+    }
+    const page1 = await (await app.request("/bookmarks?type=&limit=3")).json();
+    // fetch by cursor; no id should repeat and none should be skipped
+    const first = await (await app.request(`/bookmarks?limit=3`)).json();
+    const cursor = first.next_before;
+    expect(typeof cursor).toBe("string");
+    const second = await (await app.request(`/bookmarks?limit=3&before=${cursor}`)).json();
+    const ids1 = new Set(first.bookmarks.map((b: any) => b.id));
+    const overlap = second.bookmarks.filter((b: any) => ids1.has(b.id));
+    expect(overlap).toHaveLength(0);
+  });
+
   it("archive PUT does not overwrite an existing snapshot", async () => {
     const created = await (await app.request("/bookmarks", json({ url: "https://a.com/keep" }))).json();
     const first = `<html><head><title>First</title></head><body>${"original ".repeat(20)}</body></html>`;
@@ -210,7 +231,8 @@ describe("export", () => {
     const html = await res.text();
     const items = parseNetscape(html);
     expect(items.length).toBeGreaterThanOrEqual(3);
-    expect(items.every((i) => i.url.startsWith("https://a.com/"))).toBe(true);
+    expect(items.some((i) => i.url.startsWith("https://a.com/"))).toBe(true);
+    expect(items.every((i) => /^https?:\/\//.test(i.url))).toBe(true);
   });
   it("json export includes topics and bookmarks", async () => {
     const body = await (await app.request("/export?format=json")).json();

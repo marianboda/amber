@@ -1,6 +1,9 @@
 import PQueue from "p-queue";
 import { lookup } from "node:dns/promises";
+import { lookup as lookupCb } from "node:dns";
 import net from "node:net";
+import { Agent, fetch as undiciFetch, type RequestInit as UndiciRequestInit } from "undici";
+import { readStreamLimited } from "../http-util.js";
 
 // ---- SSRF guard -----------------------------------------------------------
 // The server fetches user-supplied URLs and asset URLs extracted from
@@ -53,13 +56,43 @@ async function assertPublicUrl(rawUrl: string): Promise<URL> {
   return url;
 }
 
+// Pins the SSRF check to the ACTUAL socket target: the same lookup that
+// validates the address is the one undici connects with, so a rebinding host
+// that answers public-then-private can't slip past the pre-check. Multi-answer
+// DNS is covered too — every returned address is validated.
+const guardedAgent = new Agent({
+  connect: {
+    lookup(hostname, options, callback) {
+      lookupCb(hostname, { ...options, all: true }, (err, addresses) => {
+        if (err) return callback(err, "", 0);
+        const list = addresses as { address: string; family: number }[];
+        if (!allowPrivate) {
+          const bad = list.find((a) => isPrivateIp(a.address));
+          if (bad) return callback(new Error(`blocked: private address ${bad.address}`), "", 0);
+        }
+        if ((options as any).all) return callback(null, list as any, undefined as any);
+        callback(null, list[0].address, list[0].family);
+      });
+    },
+  },
+});
+
 // fetch with manual redirect hops so every hop passes the SSRF check
 // (a public URL redirecting to 169.254.169.254 must not be followed).
-async function guardedFetch(rawUrl: string, init: RequestInit): Promise<Response> {
+// Uses undici's own fetch so the Agent (also from undici) is compatible —
+// Node's built-in fetch is a separate undici copy and rejects this dispatcher.
+async function guardedFetch(
+  rawUrl: string,
+  init: UndiciRequestInit
+): Promise<import("undici").Response> {
   let current = rawUrl;
   for (let hop = 0; hop < 5; hop++) {
     await assertPublicUrl(current);
-    const res = await fetch(current, { ...init, redirect: "manual" });
+    const res = await undiciFetch(current, {
+      ...init,
+      redirect: "manual",
+      dispatcher: guardedAgent,
+    });
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
       if (!location) return res;
@@ -67,7 +100,6 @@ async function guardedFetch(rawUrl: string, init: RequestInit): Promise<Response
       current = new URL(location, current).toString();
       continue;
     }
-    // expose the final URL the way redirect:'follow' would
     Object.defineProperty(res, "url", { value: current });
     return res;
   }
@@ -126,7 +158,10 @@ export async function fetchPage(url: string): Promise<FetchedPage> {
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const html = (await res.text()).slice(0, MAX_HTML_BYTES);
+    // Stream-limited: an endless/huge response is cut off at MAX_HTML_BYTES
+    // instead of being buffered whole.
+    const bytes = await readStreamLimited(res.body as any, MAX_HTML_BYTES);
+    const html = (bytes ?? Buffer.alloc(0)).toString("utf8");
     return { finalUrl: res.url || url, html, contentType: res.headers.get("content-type") ?? "" };
   });
 }
@@ -155,8 +190,8 @@ export async function fetchAsset(
         signal: AbortSignal.timeout(15_000),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const buffer = Buffer.from(await res.arrayBuffer());
-      if (buffer.length > MAX_ASSET_BYTES) throw new Error("asset too large");
+      const buffer = await readStreamLimited(res.body as any, MAX_ASSET_BYTES);
+      if (buffer === null) throw new Error("asset too large");
       return { bytes: buffer, contentType: res.headers.get("content-type") ?? "" };
     });
   } catch {

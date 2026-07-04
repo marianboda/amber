@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { detectFormat, parseNetscape, parseLines } from "../import/parse.js";
 import { dedupeItems } from "../import/run.js";
 import { enqueueJob } from "../jobs.js";
+import { readTextLimited } from "../http-util.js";
 
 export function importRoutes(db: Database.Database): Hono {
   const app = new Hono();
@@ -19,10 +20,14 @@ export function importRoutes(db: Database.Database): Hono {
       const body = await c.req.parseBody();
       const file = body["file"];
       if (!(file instanceof File)) return c.json({ error: "multipart field 'file' required" }, 400);
+      if (file.size > MAX_IMPORT) return c.json({ error: "import too large (100MB max)" }, 413);
       filename = file.name || filename;
       text = await file.text();
     } else {
-      text = await c.req.text();
+      // Stream-limited so a chunked body without Content-Length can't OOM us.
+      const streamed = await readTextLimited(c.req.raw.body, MAX_IMPORT);
+      if (streamed === null) return c.json({ error: "import too large (100MB max)" }, 413);
+      text = streamed;
     }
     if (!text.trim()) return c.json({ error: "empty import" }, 400);
 

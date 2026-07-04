@@ -29,12 +29,17 @@ function tokensMatch(provided: string, expected: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
+// Only honor X-Forwarded-For when explicitly behind a trusted proxy
+// (AMBER_TRUST_PROXY=1); otherwise a direct client could spoof it to dodge
+// the per-IP failure window. Default: real socket address.
+const trustProxy = process.env.AMBER_TRUST_PROXY === "1";
+
 export function bearerAuth(token: string): MiddlewareHandler {
   return async (c, next) => {
-    const ip =
-      c.req.header("x-forwarded-for")?.split(",")[0].trim() ??
-      (c.env as any)?.incoming?.socket?.remoteAddress ??
-      "unknown";
+    const socketIp = (c.env as any)?.incoming?.socket?.remoteAddress ?? "unknown";
+    const ip = trustProxy
+      ? (c.req.header("x-forwarded-for")?.split(",")[0].trim() ?? socketIp)
+      : socketIp;
     if (tooManyFailures(ip)) return c.json({ error: "too many attempts" }, 429);
     const header = c.req.header("Authorization") ?? "";
     const provided = header.startsWith("Bearer ") ? header.slice(7) : "";

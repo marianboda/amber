@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { canonicalize, domainOf } from "../canonical.js";
 import { enqueueJob } from "../jobs.js";
+import { readTextLimited } from "../http-util.js";
 import type { Config } from "../config.js";
 import { ensureUnsortedTopic, topicsForBookmark, setBookmarkTopics } from "./topics.js";
 
@@ -19,26 +20,6 @@ export function ftsQuery(q: string): string | null {
     .filter(Boolean);
   if (!terms.length) return null;
   return terms.map((t) => `"${t}"*`).join(" ");
-}
-
-// Reads a request body up to `limit` bytes; returns null once exceeded so the
-// caller can 413 without buffering an unbounded upload.
-async function readTextLimited(body: ReadableStream | null, limit: number): Promise<string | null> {
-  if (!body) return "";
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 export function scrubScripts(html: string): string {
@@ -142,8 +123,18 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       params.push(Number(read));
     }
     if (before) {
-      where.push("b.saved_at < ?");
-      params.push(Number(before));
+      // Stable cursor "savedAt.id": rows with an identical saved_at (common
+      // after an import that shares one ADD_DATE) are no longer skipped.
+      const dot = String(before).lastIndexOf(".");
+      const beforeSaved = Number(dot > 0 ? before.slice(0, dot) : before);
+      const beforeId = dot > 0 ? before.slice(dot + 1) : "";
+      if (beforeId) {
+        where.push("(b.saved_at < ? OR (b.saved_at = ? AND b.id < ?))");
+        params.push(beforeSaved, beforeSaved, beforeId);
+      } else {
+        where.push("b.saved_at < ?");
+        params.push(beforeSaved);
+      }
     }
     if (topic) {
       where.push(
@@ -155,12 +146,13 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
 
     const sql = `SELECT b.* FROM bookmarks b
                  ${where.length ? "WHERE " + where.join(" AND ") : ""}
-                 ORDER BY b.saved_at DESC LIMIT ?`;
+                 ORDER BY b.saved_at DESC, b.id DESC LIMIT ?`;
     const rows = db.prepare(sql).all(...params, max) as any[];
     for (const row of rows) row.topics = topicsForBookmark(db, row.id);
+    const last = rows[rows.length - 1];
     return c.json({
       bookmarks: rows,
-      next_before: rows.length === max ? rows[rows.length - 1].saved_at : null,
+      next_before: rows.length === max ? `${last.saved_at}.${last.id}` : null,
     });
   });
 
@@ -252,9 +244,16 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     if (!html || html.length < 100) return c.json({ error: "empty archive" }, 400);
     const dir = path.join(config.dataDir, "archives");
     fs.mkdirSync(dir, { recursive: true });
-    // Defense in depth: the capture already blocks scripts, but archives are
-    // replayed on this origin, so scrub script vectors server-side too.
-    fs.writeFileSync(path.join(dir, `${id}.html`), scrubScripts(html));
+    const file = path.join(dir, `${id}.html`);
+    const replace = c.req.query("replace") === "1";
+    // Atomic first-write claim: 'wx' fails if the file exists, so two
+    // concurrent first uploads can't both overwrite the preserved snapshot.
+    try {
+      fs.writeFileSync(file, scrubScripts(html), { flag: replace ? "w" : "wx" });
+    } catch (err: any) {
+      if (err?.code === "EEXIST") return c.json({ ok: true, kept_existing: true });
+      throw err;
+    }
     db.prepare(
       "UPDATE bookmarks SET archive_ref = ?, fetch_status = 'ok', enrich_status = 'pending' WHERE id = ?"
     ).run(`archives/${id}.html`, id);

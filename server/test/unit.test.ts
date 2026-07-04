@@ -9,6 +9,11 @@ describe("canonicalize", () => {
   it("strips tracking params, keeps real ones", () => {
     expect(canonicalize("https://a.com/x?utm_source=t&id=2&fbclid=z")).toBe("https://a.com/x?id=2");
   });
+  it("rejects non-http(s) protocols", () => {
+    expect(() => canonicalize("javascript:alert(1)")).toThrow();
+    expect(() => canonicalize("data:text/html,<script>x</script>")).toThrow();
+    expect(() => canonicalize("file:///etc/passwd")).toThrow();
+  });
   it("sorts params, drops hash and trailing slash, lowercases host", () => {
     expect(canonicalize("https://A.com/p/?b=2&a=1#frag")).toBe("https://a.com/p?a=1&b=2");
   });
