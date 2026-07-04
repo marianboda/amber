@@ -1,7 +1,7 @@
 const $ = (id: string) => document.getElementById(id) as HTMLInputElement;
 
 async function load() {
-  const stored = (await browser.storage.sync.get(["serverUrl", "token", "device"])) as {
+  const stored = (await browser.storage.local.get(["serverUrl", "token", "device"])) as {
     serverUrl?: string;
     token?: string;
     device?: string;
@@ -16,7 +16,7 @@ async function save() {
   const serverUrl = $("serverUrl").value.trim().replace(/\/$/, "");
   const token = $("token").value.trim();
   const device = $("device").value.trim();
-  await browser.storage.sync.set({ serverUrl, token, device });
+  await browser.storage.local.set({ serverUrl, token, device });
   status.textContent = "testing…";
   try {
     const res = await fetch(`${serverUrl}/api/ping`, {

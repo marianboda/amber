@@ -129,6 +129,50 @@ describe("bookmarks API", () => {
   });
 });
 
+describe("codex review fixes", () => {
+  it("PATCH with bad topics mutates nothing (atomicity)", async () => {
+    const created = await (await app.request("/bookmarks", json({ url: "https://a.com/atomic", note: "orig" }))).json();
+    const res = await app.request(`/bookmarks/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "changed", topics: ["no-such-topic"] }),
+    });
+    expect(res.status).toBe(400);
+    const after = await (await app.request(`/bookmarks/${created.id}`)).json();
+    expect(after.note).toBe("orig");
+  });
+
+  it("archive PUT does not overwrite an existing snapshot", async () => {
+    const created = await (await app.request("/bookmarks", json({ url: "https://a.com/keep" }))).json();
+    const first = `<html><head><title>First</title></head><body>${"original ".repeat(20)}</body></html>`;
+    await app.request(`/bookmarks/${created.id}/archive`, { method: "PUT", body: first });
+    const second = await app.request(`/bookmarks/${created.id}/archive`, {
+      method: "PUT",
+      body: `<html><head><title>Second</title></head><body>${"replaced ".repeat(20)}</body></html>`,
+    });
+    expect((await second.json()).kept_existing).toBe(true);
+    const served = await (await app.request(`/bookmarks/${created.id}/archive`)).text();
+    expect(served).toContain("original");
+    expect(served).not.toContain("replaced");
+  });
+
+  it("AI topic re-runs replace stale AI topics but keep user ones", async () => {
+    const { applyTopics } = await import("../src/pipeline/enrich.js");
+    const created = await (await app.request("/bookmarks", json({ url: "https://a.com/topics2" }))).json();
+    await app.request("/topics", json({ name: "t-old" }));
+    await app.request("/topics", json({ name: "t-new" }));
+    await app.request("/topics", json({ name: "t-user" }));
+    applyTopics(db, created.id, ["t-old"]);
+    db.prepare(
+      `INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai)
+       SELECT ?, id, 0 FROM topics WHERE name = 't-user'`
+    ).run(created.id);
+    applyTopics(db, created.id, ["t-new"]);
+    const bookmark = await (await app.request(`/bookmarks/${created.id}`)).json();
+    expect(bookmark.topics.map((t: any) => t.name).sort()).toEqual(["t-new", "t-user"]);
+  });
+});
+
 describe("archive", () => {
   it("stores scrubbed snapshot, serves it with CSP, enqueues enrichment", async () => {
     const created = await (

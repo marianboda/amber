@@ -87,6 +87,9 @@ app.get("/assets/:kind/:file", (c) => {
   };
   c.header("Content-Type", types[ext] ?? "application/octet-stream");
   c.header("Cache-Control", "public, max-age=31536000, immutable");
+  // SVGs from untrusted pages are active content — neutralize direct opens.
+  c.header("Content-Security-Policy", "sandbox; script-src 'none'");
+  c.header("X-Content-Type-Options", "nosniff");
   return c.body(fs.readFileSync(full));
 });
 

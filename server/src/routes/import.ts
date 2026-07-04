@@ -8,6 +8,10 @@ export function importRoutes(db: Database.Database): Hono {
   const app = new Hono();
 
   app.post("/", async (c) => {
+    const MAX_IMPORT = 100 * 1024 * 1024;
+    if (Number(c.req.header("content-length") ?? 0) > MAX_IMPORT) {
+      return c.json({ error: "import too large (100MB max)" }, 413);
+    }
     let text: string;
     let filename = "import";
     const contentType = c.req.header("content-type") ?? "";

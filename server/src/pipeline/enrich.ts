@@ -23,15 +23,21 @@ function vocabulary(db: Database.Database): string[] {
   return (db.prepare("SELECT name FROM topics").all() as { name: string }[]).map((r) => r.name);
 }
 
-function applyTopics(db: Database.Database, bookmarkId: string, names: string[]) {
+// Idempotent: replaces previous AI-assigned topics (re-runs don't accumulate
+// stale classifications); user-corrected assignments (by_ai=0) are kept.
+export function applyTopics(db: Database.Database, bookmarkId: string, names: string[]) {
   const lookup = db.prepare("SELECT id FROM topics WHERE name = ?");
-  const insert = db.prepare(
-    "INSERT OR IGNORE INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES (?, ?, 1)"
-  );
-  for (const name of names) {
-    const topic = lookup.get(name) as { id: string } | undefined;
-    if (topic) insert.run(bookmarkId, topic.id);
-  }
+  const run = db.transaction(() => {
+    db.prepare("DELETE FROM bookmark_topics WHERE bookmark_id = ? AND by_ai = 1").run(bookmarkId);
+    const insert = db.prepare(
+      "INSERT OR IGNORE INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES (?, ?, 1)"
+    );
+    for (const name of names) {
+      const topic = lookup.get(name) as { id: string } | undefined;
+      if (topic) insert.run(bookmarkId, topic.id);
+    }
+  });
+  run();
 }
 
 // Idempotent: safe to re-run after a crash mid-way — every step overwrites.
@@ -112,7 +118,16 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
           .prepare("SELECT id FROM bookmarks WHERE canonical_url = ? AND id != ?")
           .get(finalCanonical, bookmarkId) as { id: string } | undefined;
         if (owner) {
-          // Duplicate discovered post-redirect: first-seen wins, drop this one.
+          // Duplicate discovered post-redirect: first-seen wins, but carry the
+          // new save's note over so user input is never silently dropped.
+          if (bookmark.note) {
+            db.prepare(
+              `UPDATE bookmarks SET note = CASE
+                 WHEN note IS NULL OR note = '' THEN ?
+                 ELSE note || char(10) || char(10) || ?
+               END WHERE id = ?`
+            ).run(bookmark.note, bookmark.note, owner.id);
+          }
           db.prepare("DELETE FROM bookmarks WHERE id = ?").run(bookmarkId);
           return;
         }

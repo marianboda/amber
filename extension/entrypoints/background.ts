@@ -23,8 +23,9 @@ export default defineBackground(() => {
       archive_coming: true,
     });
     // Archive the rendered page (assets inlined) — works behind logins and
-    // survives dead URLs. Runs after the save toast; best-effort.
-    if (saved) await captureAndUpload(tab.id, saved);
+    // survives dead URLs. Duplicates are skipped: the original snapshot is
+    // the preserved one (permanence principle — nothing gets overwritten).
+    if (saved && !saved.duplicate) await captureAndUpload(tab.id, saved.id);
   });
 
   // Right-click a link → save that link, current page recorded as referrer.
@@ -33,7 +34,7 @@ export default defineBackground(() => {
     await save(tab.id, { url: info.linkUrl, referrer: tab.url, saved_from: "context_menu" });
   });
 
-  async function save(tabId: number, args: SaveArgs): Promise<string | null> {
+  async function save(tabId: number, args: SaveArgs) {
     try {
       const result = await saveBookmark(args);
       const dupText = result.saved_at
@@ -45,7 +46,7 @@ export default defineBackground(() => {
           if (gist) toast(tabId, gist, "gist");
         });
       }
-      return result.id;
+      return result;
     } catch (err: any) {
       await toast(tabId, `Amber: ${err.message}`, "error");
       return null;

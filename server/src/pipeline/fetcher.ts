@@ -1,4 +1,79 @@
 import PQueue from "p-queue";
+import { lookup } from "node:dns/promises";
+import net from "node:net";
+
+// ---- SSRF guard -----------------------------------------------------------
+// The server fetches user-supplied URLs and asset URLs extracted from
+// untrusted pages. Block anything that resolves to private/loopback/link-local
+// space so a hostile page can't make Amber probe internal services.
+// AMBER_ALLOW_PRIVATE=1 disables the guard for local development.
+
+const allowPrivate = process.env.AMBER_ALLOW_PRIVATE === "1";
+
+function isPrivateIp(ip: string): boolean {
+  if (net.isIPv6(ip)) {
+    const lower = ip.toLowerCase();
+    if (lower.startsWith("::ffff:")) return isPrivateIp(lower.slice(7));
+    return (
+      lower === "::" ||
+      lower === "::1" ||
+      lower.startsWith("fe80") ||
+      lower.startsWith("fc") ||
+      lower.startsWith("fd")
+    );
+  }
+  const [a, b] = ip.split(".").map(Number);
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+async function assertPublicUrl(rawUrl: string): Promise<URL> {
+  const url = new URL(rawUrl);
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error(`blocked: ${url.protocol} url`);
+  }
+  if (allowPrivate) return url;
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".local") || host.endsWith(".internal")) {
+    throw new Error("blocked: private hostname");
+  }
+  if (net.isIP(host)) {
+    if (isPrivateIp(host)) throw new Error("blocked: private address");
+    return url;
+  }
+  const { address } = await lookup(host);
+  if (isPrivateIp(address)) throw new Error("blocked: private address");
+  return url;
+}
+
+// fetch with manual redirect hops so every hop passes the SSRF check
+// (a public URL redirecting to 169.254.169.254 must not be followed).
+async function guardedFetch(rawUrl: string, init: RequestInit): Promise<Response> {
+  let current = rawUrl;
+  for (let hop = 0; hop < 5; hop++) {
+    await assertPublicUrl(current);
+    const res = await fetch(current, { ...init, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) return res;
+      res.body?.cancel().catch(() => {});
+      current = new URL(location, current).toString();
+      continue;
+    }
+    // expose the final URL the way redirect:'follow' would
+    Object.defineProperty(res, "url", { value: current });
+    return res;
+  }
+  throw new Error("too many redirects");
+}
+// ---------------------------------------------------------------------------
 
 // Two-level outbound rate limiting (design §5):
 // - global cap so imports never blast the network,
@@ -46,9 +121,8 @@ export interface FetchedPage {
 
 export async function fetchPage(url: string): Promise<FetchedPage> {
   return schedule(url, async () => {
-    const res = await fetch(url, {
+    const res = await guardedFetch(url, {
       headers: { "User-Agent": DESKTOP_UA, Accept: "text/html,application/xhtml+xml,*/*" },
-      redirect: "follow",
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -59,7 +133,7 @@ export async function fetchPage(url: string): Promise<FetchedPage> {
 
 export async function fetchJson(url: string): Promise<any> {
   return schedule(url, async () => {
-    const res = await fetch(url, {
+    const res = await guardedFetch(url, {
       headers: { "User-Agent": DESKTOP_UA, Accept: "application/json" },
       signal: AbortSignal.timeout(15_000),
     });
@@ -76,7 +150,7 @@ export async function fetchAsset(
 ): Promise<{ bytes: Buffer; contentType: string } | null> {
   try {
     return await schedule(url, async () => {
-      const res = await fetch(url, {
+      const res = await guardedFetch(url, {
         headers: { "User-Agent": DESKTOP_UA },
         signal: AbortSignal.timeout(15_000),
       });

@@ -21,6 +21,26 @@ export function ftsQuery(q: string): string | null {
   return terms.map((t) => `"${t}"*`).join(" ");
 }
 
+// Reads a request body up to `limit` bytes; returns null once exceeded so the
+// caller can 413 without buffering an unbounded upload.
+async function readTextLimited(body: ReadableStream | null, limit: number): Promise<string | null> {
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 export function scrubScripts(html: string): string {
   return html
     .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
@@ -61,25 +81,37 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     const deferEnrich = body.archive_coming === true;
     const savedAt =
       typeof body.saved_at === "number" ? body.saved_at : Math.floor(Date.now() / 1000);
-    db.prepare(
-      `INSERT INTO bookmarks
-         (id, url, canonical_url, title, domain, saved_at, note,
-          saved_from, device, referrer, source_detail, topic_hint)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
-      id,
-      body.url,
-      canonical,
-      body.title ?? null,
-      domain,
-      savedAt,
-      body.note ?? null,
-      savedFrom,
-      body.device ?? null,
-      body.referrer ?? null,
-      body.source_detail ?? null,
-      body.topic_hint ?? null
-    );
+    try {
+      db.prepare(
+        `INSERT INTO bookmarks
+           (id, url, canonical_url, title, domain, saved_at, note,
+            saved_from, device, referrer, source_detail, topic_hint)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        id,
+        body.url,
+        canonical,
+        body.title ?? null,
+        domain,
+        savedAt,
+        body.note ?? null,
+        savedFrom,
+        body.device ?? null,
+        body.referrer ?? null,
+        body.source_detail ?? null,
+        body.topic_hint ?? null
+      );
+    } catch (err: any) {
+      // Concurrent save of the same URL lost the race on the unique index —
+      // return the winner as a duplicate instead of a 500.
+      if (String(err?.code).startsWith("SQLITE_CONSTRAINT")) {
+        const winner = db
+          .prepare("SELECT id, saved_at FROM bookmarks WHERE canonical_url = ?")
+          .get(canonical) as { id: string; saved_at: number } | undefined;
+        if (winner) return c.json({ id: winner.id, duplicate: true, saved_at: winner.saved_at }, 200);
+      }
+      throw err;
+    }
     if (!deferEnrich) enqueueJob(db, "enrich", { bookmark_id: id });
     return c.json({ id }, 201);
   });
@@ -154,6 +186,14 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     const body = await c.req.json().catch(() => null);
     if (!body) return c.json({ error: "invalid body" }, 400);
 
+    // Validate topics BEFORE any write so a bad topic list can't leave a
+    // half-applied patch behind.
+    if (Array.isArray(body.topics)) {
+      const known = db.prepare("SELECT name FROM topics").all() as { name: string }[];
+      const vocab = new Set(known.map((t) => t.name));
+      const unknown = body.topics.filter((t: string) => !vocab.has(t));
+      if (unknown.length) return c.json({ error: "unknown topics", topics: unknown }, 400);
+    }
     const sets: string[] = [];
     const params: unknown[] = [];
     if ("note" in body) {
@@ -168,13 +208,13 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       sets.push("is_read = ?");
       params.push(body.is_read ? 1 : 0);
     }
-    if (sets.length) {
-      db.prepare(`UPDATE bookmarks SET ${sets.join(", ")} WHERE id = ?`).run(...params, id);
-    }
-    if (Array.isArray(body.topics)) {
-      const unknown = setBookmarkTopics(db, id, body.topics);
-      if (unknown.length) return c.json({ error: "unknown topics", topics: unknown }, 400);
-    }
+    const apply = db.transaction(() => {
+      if (sets.length) {
+        db.prepare(`UPDATE bookmarks SET ${sets.join(", ")} WHERE id = ?`).run(...params, id);
+      }
+      if (Array.isArray(body.topics)) setBookmarkTopics(db, id, body.topics);
+    });
+    apply();
     const row = db.prepare("SELECT * FROM bookmarks WHERE id = ?").get(id) as any;
     row.topics = topicsForBookmark(db, id);
     return c.json(row);
@@ -191,13 +231,24 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
   // logged-in tab actually rendered, then re-extracts from that copy.
   app.put("/:id/archive", async (c) => {
     const id = c.req.param("id");
-    const exists = db.prepare("SELECT id FROM bookmarks WHERE id = ?").get(id);
-    if (!exists) return c.json({ error: "not found" }, 404);
+    const row = db.prepare("SELECT id, archive_ref FROM bookmarks WHERE id = ?").get(id) as
+      | { id: string; archive_ref: string | null }
+      | undefined;
+    if (!row) return c.json({ error: "not found" }, 404);
+    // Permanence: the first snapshot is the preserved one — never overwritten.
+    // (?replace=1 exists as a deliberate escape hatch.)
+    if (
+      row.archive_ref &&
+      fs.existsSync(path.join(config.dataDir, row.archive_ref)) &&
+      c.req.query("replace") !== "1"
+    ) {
+      return c.json({ ok: true, kept_existing: true });
+    }
     const MAX_ARCHIVE = 300 * 1024 * 1024;
     const declared = Number(c.req.header("content-length") ?? 0);
     if (declared > MAX_ARCHIVE) return c.json({ error: "archive too large (300MB max)" }, 413);
-    const html = await c.req.text();
-    if (html.length > MAX_ARCHIVE) return c.json({ error: "archive too large (300MB max)" }, 413);
+    const html = await readTextLimited(c.req.raw.body, MAX_ARCHIVE);
+    if (html === null) return c.json({ error: "archive too large (300MB max)" }, 413);
     if (!html || html.length < 100) return c.json({ error: "empty archive" }, 400);
     const dir = path.join(config.dataDir, "archives");
     fs.mkdirSync(dir, { recursive: true });

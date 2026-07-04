@@ -7,7 +7,9 @@ export interface AmberSettings {
 }
 
 export async function getSettings(): Promise<AmberSettings> {
-  const stored = (await browser.storage.sync.get(["serverUrl", "token", "device"])) as {
+  // storage.local, not sync: the bearer token must not replicate through
+  // browser cloud sync onto every signed-in profile.
+  const stored = (await browser.storage.local.get(["serverUrl", "token", "device"])) as {
     serverUrl?: string;
     token?: string;
     device?: string;
