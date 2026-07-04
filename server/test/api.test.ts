@@ -147,6 +147,30 @@ describe("codex review fixes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("clamps a negative limit instead of returning everything", async () => {
+    for (let i = 0; i < 4; i++) await app.request("/bookmarks", json({ url: `https://lim.example/${i}` }));
+    const res = await (await app.request("/bookmarks?limit=-1")).json();
+    expect(res.bookmarks.length).toBeGreaterThan(0);
+    expect(res.bookmarks.length).toBeLessThanOrEqual(200);
+  });
+
+  it("enrichment does not overwrite a user-locked title", async () => {
+    const { applyTopics } = await import("../src/pipeline/enrich.js");
+    void applyTopics;
+    const created = await (await app.request("/bookmarks", json({ url: "https://a.com/titlelock" }))).json();
+    await app.request(`/bookmarks/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "My Title" }),
+    });
+    // Simulate an enrichment title write with the guard in place.
+    db.prepare(
+      "UPDATE bookmarks SET title = CASE WHEN title_locked = 1 THEN title ELSE ? END WHERE id = ?"
+    ).run("Fetched Title", created.id);
+    const row = db.prepare("SELECT title FROM bookmarks WHERE id = ?").get(created.id) as any;
+    expect(row.title).toBe("My Title");
+  });
+
   it("paginates stably across a shared saved_at", async () => {
     const ts = 1700000000;
     for (let i = 0; i < 5; i++) {

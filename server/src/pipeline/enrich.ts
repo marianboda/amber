@@ -68,7 +68,8 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
     const oembed = await fetchOEmbed(bookmark.url);
     if (oembed) {
       db.prepare(
-        "UPDATE bookmarks SET title = COALESCE(?, title), og_image_url = ?, fetch_status = 'ok' WHERE id = ?"
+        `UPDATE bookmarks SET title = CASE WHEN title_locked = 1 THEN title ELSE COALESCE(?, title) END,
+         og_image_url = ?, fetch_status = 'ok' WHERE id = ?`
       ).run(oembed.title, oembed.thumbnail, bookmarkId);
     } else {
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
@@ -103,8 +104,10 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
       title = extracted.title ?? title;
       text = extracted.text ?? extracted.description;
       db.prepare(
-        `UPDATE bookmarks SET title = ?, favicon_url = COALESCE(favicon_url, ?),
-         og_image_url = COALESCE(og_image_url, ?), content_text = ?, fetch_status = 'ok'
+        `UPDATE bookmarks SET
+           title = CASE WHEN title_locked = 1 THEN title ELSE ? END,
+           favicon_url = COALESCE(favicon_url, ?),
+           og_image_url = COALESCE(og_image_url, ?), content_text = ?, fetch_status = 'ok'
          WHERE id = ?`
       ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
     } else
@@ -159,8 +162,10 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
       // Fallback to og:description when extraction yields nothing (SPA, paywall).
       text = extracted.text ?? extracted.description;
       db.prepare(
-        `UPDATE bookmarks SET title = ?, favicon_url = ?, og_image_url = ?,
-         content_text = ?, fetch_status = 'ok' WHERE id = ?`
+        `UPDATE bookmarks SET
+           title = CASE WHEN title_locked = 1 THEN title ELSE ? END,
+           favicon_url = ?, og_image_url = ?,
+           content_text = ?, fetch_status = 'ok' WHERE id = ?`
       ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
       // Non-extension saves get a server-side archive of what was fetched.
       await archiveFallback(db, config.dataDir, bookmarkId, page.finalUrl, page.html);

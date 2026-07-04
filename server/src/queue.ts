@@ -4,6 +4,20 @@ import PQueue from "p-queue";
 export type JobHandler = (payload: any, jobId: string) => Promise<void>;
 
 const MAX_ATTEMPTS = 2;
+const JOB_TIMEOUT_MS = 180_000; // wedged handler can't hold a slot forever
+const LEASE_SECONDS = 600; // a 'running' row not touched in this long is stale
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`job timed out after ${ms}ms`)), ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
 
 // DB-backed worker: jobs live in the `jobs` table (source of truth), this
 // queue is only the executor (design §2). Polls for pending rows, claims by
@@ -28,10 +42,17 @@ export function startWorker(
   );
   const finish = db.prepare("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?");
   const requeue = db.prepare("UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ?");
+  const reclaim = db.prepare(
+    "UPDATE jobs SET status = 'pending' WHERE status = 'running' AND updated_at < ?"
+  );
 
   const now = () => Math.floor(Date.now() / 1000);
 
   function tick() {
+    // Reclaim leases from handlers that wedged while the process kept running
+    // (no restart needed); idempotent handlers make the re-run safe.
+    const stale = reclaim.run(now() - LEASE_SECONDS).changes;
+    if (stale > 0) console.warn(`queue: reclaimed ${stale} stale running job(s)`);
     while (executor.size + executor.pending < concurrency * 2) {
       const job = claim.get(now()) as
         | { id: string; type: string; payload: string; attempts: number }
@@ -41,7 +62,7 @@ export function startWorker(
         const handler = handlers[job.type];
         try {
           if (!handler) throw new Error(`no handler for job type '${job.type}'`);
-          await handler(JSON.parse(job.payload), job.id);
+          await withTimeout(handler(JSON.parse(job.payload), job.id), JOB_TIMEOUT_MS);
           finish.run("done", null, now(), job.id);
         } catch (err: any) {
           const message = String(err?.message ?? err).slice(0, 500);

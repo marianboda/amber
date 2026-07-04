@@ -25,7 +25,7 @@ export default defineBackground(() => {
     // Archive the rendered page (assets inlined) — works behind logins and
     // survives dead URLs. Duplicates are skipped: the original snapshot is
     // the preserved one (permanence principle — nothing gets overwritten).
-    if (saved && !saved.duplicate) await captureAndUpload(tab.id, saved.id);
+    if (saved && !saved.duplicate) await captureAndUpload(tab.id, saved.id, tab.url);
   });
 
   // Right-click a link → save that link, current page recorded as referrer.
@@ -53,8 +53,12 @@ export default defineBackground(() => {
     }
   }
 
-  async function captureAndUpload(tabId: number, bookmarkId: string) {
+  async function captureAndUpload(tabId: number, bookmarkId: string, expectedUrl: string) {
     try {
+      // If the user navigated after clicking, don't archive the new page under
+      // the old bookmark — bail unless the tab is still on the saved URL.
+      const tab = await browser.tabs.get(tabId).catch(() => null);
+      if (!tab || tab.url !== expectedUrl) return;
       // Frames listener first (all frames), then the top-frame capturer.
       await browser.scripting
         .executeScript({ target: { tabId, allFrames: true }, files: ["/capture-frames.js"] })

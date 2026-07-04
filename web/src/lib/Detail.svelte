@@ -11,8 +11,12 @@
   let saving = $state(false);
 
   $effect(() => {
-    if (store.detailId) {
-      api.get(store.detailId).then((b) => {
+    const requested = store.detailId;
+    if (requested) {
+      api.get(requested).then((b) => {
+        // Ignore a slow response for a bookmark the user already navigated away
+        // from — otherwise clicking A then B could leave A's data on screen.
+        if (store.detailId !== requested) return;
         bookmark = b;
         note = b.note ?? "";
       });

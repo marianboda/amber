@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 import { detectFormat, parseNetscape, parseLines } from "../import/parse.js";
 import { dedupeItems } from "../import/run.js";
 import { enqueueJob } from "../jobs.js";
-import { readTextLimited } from "../http-util.js";
+import { readStreamLimited } from "../http-util.js";
 
 export function importRoutes(db: Database.Database): Hono {
   const app = new Hono();
@@ -13,21 +13,24 @@ export function importRoutes(db: Database.Database): Hono {
     if (Number(c.req.header("content-length") ?? 0) > MAX_IMPORT) {
       return c.json({ error: "import too large (100MB max)" }, 413);
     }
+    // Buffer the raw body under a hard cap FIRST, so a chunked upload with no
+    // Content-Length can't make parseBody() buffer gigabytes before we check.
+    const buffered = await readStreamLimited(c.req.raw.body, MAX_IMPORT);
+    if (buffered === null) return c.json({ error: "import too large (100MB max)" }, 413);
+
     let text: string;
     let filename = "import";
     const contentType = c.req.header("content-type") ?? "";
     if (contentType.includes("multipart/form-data")) {
-      const body = await c.req.parseBody();
-      const file = body["file"];
+      const form = await new Response(new Uint8Array(buffered), {
+        headers: { "content-type": contentType },
+      }).formData();
+      const file = form.get("file");
       if (!(file instanceof File)) return c.json({ error: "multipart field 'file' required" }, 400);
-      if (file.size > MAX_IMPORT) return c.json({ error: "import too large (100MB max)" }, 413);
       filename = file.name || filename;
       text = await file.text();
     } else {
-      // Stream-limited so a chunked body without Content-Length can't OOM us.
-      const streamed = await readTextLimited(c.req.raw.body, MAX_IMPORT);
-      if (streamed === null) return c.json({ error: "import too large (100MB max)" }, 413);
-      text = streamed;
+      text = buffered.toString("utf8");
     }
     if (!text.trim()) return c.json({ error: "empty import" }, 400);
 

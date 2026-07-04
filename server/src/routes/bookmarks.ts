@@ -99,7 +99,10 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
 
   app.get("/", (c) => {
     const { topic, type, q, read, before, limit } = c.req.query();
-    const max = Math.min(Number(limit) || 50, 200);
+    // Clamp to [1, 200]; invalid/≤0 falls back to 50 (a raw negative would
+    // become SQLite LIMIT -1 = unbounded and could scan the whole library).
+    const requested = Math.trunc(Number(limit));
+    const max = Math.min(requested >= 1 ? requested : 50, 200);
 
     const where: string[] = [];
     const params: unknown[] = [];
@@ -193,7 +196,8 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       params.push(body.note);
     }
     if ("title" in body) {
-      sets.push("title = ?");
+      // Lock the title so later enrichment never clobbers a user edit.
+      sets.push("title = ?", "title_locked = 1");
       params.push(body.title);
     }
     if ("is_read" in body) {
