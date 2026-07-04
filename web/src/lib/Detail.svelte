@@ -2,6 +2,9 @@
   import { api, type Bookmark } from "./api";
   import { store, updateBookmark, removeBookmark } from "./store.svelte";
   import { TYPE_ICONS, provenance } from "./format";
+  import Reader from "./Reader.svelte";
+
+  let readerOpen = $state(false);
 
   let bookmark = $state<Bookmark | null>(null);
   let note = $state("");
@@ -96,12 +99,19 @@
 
     <div class="actions">
       <a class="btn" href={bookmark.url} target="_blank" rel="noopener">Open original ↗</a>
+      {#if bookmark.content_text}
+        <button class="btn" onclick={() => (readerOpen = true)}>Read 📖</button>
+      {/if}
       {#if bookmark.archive_ref}
         <button class="btn" onclick={openArchive}>Archived copy 🗂</button>
       {/if}
       <button class="btn danger" onclick={del}>Delete</button>
     </div>
   </aside>
+{/if}
+
+{#if readerOpen && bookmark}
+  <Reader {bookmark} onclose={() => (readerOpen = false)} />
 {/if}
 
 {#if archiveUrl}

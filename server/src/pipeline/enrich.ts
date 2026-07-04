@@ -7,6 +7,8 @@ import { fetchPage } from "./fetcher.js";
 import { extractPage } from "./extract.js";
 import { enrichWithLLM, type Enrichment } from "./llm.js";
 import { isYouTube, fetchOEmbed, enrichYouTubeWithGemini } from "./youtube.js";
+import { cacheAssets } from "./assets.js";
+import { archiveFallback } from "./archive-fallback.js";
 
 function readArchive(dataDir: string, archiveRef: string | null): string | null {
   if (!archiveRef) return null;
@@ -69,6 +71,7 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
       db.prepare(
         "UPDATE bookmarks SET content_type = 'video', enrich_status = 'done' WHERE id = ?"
       ).run(bookmarkId);
+      await cacheAssets(db, config.dataDir, bookmarkId).catch(() => {});
       return;
     }
     enrichment = await enrichYouTubeWithGemini(config, bookmark.url, topicNames);
@@ -128,6 +131,8 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
         `UPDATE bookmarks SET title = ?, favicon_url = ?, og_image_url = ?,
          content_text = ?, fetch_status = 'ok' WHERE id = ?`
       ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
+      // Non-extension saves get a server-side archive of what was fetched.
+      await archiveFallback(db, config.dataDir, bookmarkId, page.finalUrl, page.html);
     } catch {
       // Dead link: keep the bookmark, classify from title/URL alone (design §8).
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
@@ -135,6 +140,7 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
 
     if (config.llm.provider === "none") {
       db.prepare("UPDATE bookmarks SET enrich_status = 'done' WHERE id = ?").run(bookmarkId);
+      await cacheAssets(db, config.dataDir, bookmarkId).catch(() => {});
       return;
     }
     enrichment = await enrichWithLLM(config.llm, {
@@ -150,4 +156,6 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
     "UPDATE bookmarks SET gist = ?, summary = ?, content_type = ?, enrich_status = 'done' WHERE id = ?"
   ).run(enrichment.gist, enrichment.summary, enrichment.content_type, bookmarkId);
   applyTopics(db, bookmarkId, enrichment.topics);
+  // Cache thumbnails/favicons locally so cards survive link rot (best-effort).
+  await cacheAssets(db, config.dataDir, bookmarkId).catch(() => {});
 }

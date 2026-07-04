@@ -14,10 +14,21 @@ export async function extractPage(html: string, url: string): Promise<ExtractedP
   return {
     title: result.title || null,
     description: result.description || null,
-    favicon: result.favicon || null,
-    image: result.image || null,
+    favicon: absolute(result.favicon, url),
+    image: absolute(result.image, url),
     text: text && text.trim().length > 0 ? text : null,
   };
+}
+
+// Defuddle can return page-relative asset URLs; resolve against the page.
+function absolute(value: string | null | undefined, base: string): string | null {
+  if (!value) return null;
+  if (value.startsWith("data:")) return value;
+  try {
+    return new URL(value, base).toString();
+  } catch {
+    return null;
+  }
 }
 
 function htmlToText(html: string): string {

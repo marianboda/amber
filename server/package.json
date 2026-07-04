@@ -16,6 +16,7 @@
   "type": "module",
   "dependencies": {
     "@hono/node-server": "^2.0.8",
+    "archiver": "^8.0.0",
     "better-sqlite3": "^12.11.1",
     "defuddle": "^0.19.1",
     "hono": "^4.12.27",
@@ -23,6 +24,7 @@
     "p-queue": "^9.3.0"
   },
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jsdom": "^28.0.3",
     "@types/node": "^26.1.0",

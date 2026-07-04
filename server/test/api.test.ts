@@ -32,7 +32,7 @@ beforeAll(() => {
   app = new Hono();
   app.route("/bookmarks", bookmarkRoutes(db, config));
   app.route("/topics", topicRoutes(db));
-  app.route("/export", exportRoutes(db));
+  app.route("/export", exportRoutes(db, dir));
 });
 
 afterAll(() => {
@@ -173,6 +173,24 @@ describe("export", () => {
     expect(body.version).toBe(1);
     expect(Array.isArray(body.bookmarks)).toBe(true);
     expect(body.bookmarks.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("zip export streams a zip with the metadata and archives", async () => {
+    const res = await app.request("/export?format=zip");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toBe("application/zip");
+    const bytes = Buffer.from(await res.arrayBuffer());
+    expect(bytes.subarray(0, 2).toString()).toBe("PK"); // zip magic
+    expect(bytes.length).toBeGreaterThan(500);
+  });
+
+  it("bulk retry re-enqueues failed enrichments", async () => {
+    const created = await (await app.request("/bookmarks", json({ url: "https://a.com/failed1" }))).json();
+    db.prepare("UPDATE bookmarks SET enrich_status='failed' WHERE id = ?").run(created.id);
+    const res = await (await app.request("/bookmarks/retry-failed", { method: "POST" })).json();
+    expect(res.retried).toBeGreaterThanOrEqual(1);
+    const row = db.prepare("SELECT enrich_status FROM bookmarks WHERE id = ?").get(created.id) as any;
+    expect(row.enrich_status).toBe("pending");
   });
 });
 

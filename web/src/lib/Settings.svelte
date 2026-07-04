@@ -1,8 +1,32 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { api, getToken, setToken } from "./api";
   import { store, reload, reloadTopics } from "./store.svelte";
 
   let token = $state(getToken());
+  let retryMsg = $state("");
+
+  // Resume progress display for an import still running server-side.
+  onMount(async () => {
+    if (!getToken()) return;
+    try {
+      const { imports } = await api.importList();
+      const active = imports.find((j) => j.status === "pending" || j.status === "running");
+      if (active) {
+        importJob = active.job_id;
+        importMsg = `resuming: ${active.filename}`;
+        pollImport();
+      }
+    } catch {
+      /* not connected yet */
+    }
+  });
+
+  async function retryFailed() {
+    const res = await api.retryFailed();
+    retryMsg = res.retried ? `re-queued ${res.retried}` : "nothing failed";
+    if (res.retried) reload();
+  }
   let status = $state("");
   let saveUrl = $state("");
   let saveMsg = $state("");
@@ -81,18 +105,19 @@
 
   function bookmarkletHref(): string {
     const origin = location.origin;
-    const code = `(async()=>{try{const r=await fetch(${JSON.stringify(origin)}+"/api/bookmarks",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+${JSON.stringify(getToken())}},body:JSON.stringify({url:location.href,note:String(getSelection()||"")||undefined,saved_from:"api",source_detail:"bookmarklet"})});const d=await r.json();alert(d.duplicate?"Already in Amber":r.ok?"Saved to Amber ✓":"Amber error: "+(d.error||r.status))}catch(e){alert("Amber unreachable")}})()`;
+    const code = `(async()=>{try{const r=await fetch(${JSON.stringify(origin)}+"/api/bookmarks",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+${JSON.stringify(getToken())}},body:JSON.stringify({url:location.href,note:String(getSelection()||"")||undefined,saved_from:"api",source_detail:"bookmarklet"})});const d=await r.json();alert(d.duplicate?"Already in Amber — first saved "+new Date(d.saved_at*1000).toLocaleDateString():r.ok?"Saved to Amber ✓":"Amber error: "+(d.error||r.status))}catch(e){alert("Amber unreachable")}})()`;
     return `javascript:${encodeURIComponent(code)}`;
   }
 
-  async function download(format: "json" | "html") {
+  async function download(format: "json" | "html" | "zip") {
     const res = await fetch(api.exportUrl(format), {
       headers: { Authorization: `Bearer ${getToken()}` },
     });
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = format === "json" ? "amber-export.json" : "amber-export.html";
+    a.download =
+      format === "json" ? "amber-export.json" : format === "zip" ? "amber-backup.zip" : "amber-export.html";
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -151,6 +176,15 @@
     <div class="row">
       <button onclick={() => download("json")}>JSON (full fidelity)</button>
       <button onclick={() => download("html")}>Netscape HTML</button>
+      <button onclick={() => download("zip")}>Full backup (zip incl. archives)</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Maintenance</h2>
+    <div class="row">
+      <button onclick={retryFailed}>Retry failed enrichments</button>
+      <span class="status">{retryMsg}</span>
     </div>
   </section>
 

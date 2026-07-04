@@ -224,6 +224,18 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     return c.body(fs.readFileSync(file));
   });
 
+  // Re-enqueue every failed enrichment in one shot.
+  app.post("/retry-failed", (c) => {
+    const failed = db
+      .prepare("SELECT id FROM bookmarks WHERE enrich_status = 'failed'")
+      .all() as { id: string }[];
+    for (const { id } of failed) {
+      db.prepare("UPDATE bookmarks SET enrich_status = 'pending' WHERE id = ?").run(id);
+      enqueueJob(db, "enrich", { bookmark_id: id });
+    }
+    return c.json({ retried: failed.length });
+  });
+
   app.post("/:id/retry", (c) => {
     const id = c.req.param("id");
     const row = db.prepare("SELECT enrich_status FROM bookmarks WHERE id = ?").get(id) as

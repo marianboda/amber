@@ -61,6 +61,15 @@
     grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     gap: 0.8rem;
   }
+  @media (max-width: 560px) {
+    main {
+      padding: 0.6rem;
+    }
+    .cards {
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 0.5rem;
+    }
+  }
   .cards.list {
     grid-template-columns: 1fr;
     gap: 0.4rem;

@@ -30,6 +30,27 @@ export function importRoutes(db: Database.Database): Hono {
     return c.json({ job_id: jobId, count: items.length }, 202);
   });
 
+  // Recent import jobs — lets the UI resume progress after a page reload.
+  app.get("/", (c) => {
+    const jobs = db
+      .prepare(
+        "SELECT id, status, payload, created_at FROM jobs WHERE type = 'import' ORDER BY created_at DESC LIMIT 10"
+      )
+      .all() as { id: string; status: string; payload: string; created_at: number }[];
+    return c.json({
+      imports: jobs.map((j) => {
+        const payload = JSON.parse(j.payload);
+        return {
+          job_id: j.id,
+          status: j.status,
+          filename: payload.filename,
+          progress: payload.progress ?? null,
+          created_at: j.created_at,
+        };
+      }),
+    });
+  });
+
   app.get("/:job_id", (c) => {
     const job = db
       .prepare("SELECT id, status, payload, error FROM jobs WHERE id = ? AND type = 'import'")

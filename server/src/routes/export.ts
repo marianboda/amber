@@ -1,14 +1,37 @@
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { PassThrough, Readable } from "node:stream";
+import { ZipArchive } from "archiver";
 import { topicsForBookmark } from "./topics.js";
 
-export function exportRoutes(db: Database.Database): Hono {
+export function exportRoutes(db: Database.Database, dataDir: string): Hono {
   const app = new Hono();
 
   app.get("/", (c) => {
     const format = c.req.query("format") ?? "json";
     const bookmarks = db.prepare("SELECT * FROM bookmarks ORDER BY saved_at DESC").all() as any[];
     for (const b of bookmarks) b.topics = topicsForBookmark(db, b.id);
+
+    if (format === "zip") {
+      // Full backup: metadata JSON + archived pages + cached assets, streamed.
+      const topics = db.prepare("SELECT * FROM topics ORDER BY name").all();
+      const zip = new ZipArchive({ zlib: { level: 6 } });
+      const out = new PassThrough();
+      zip.pipe(out);
+      zip.append(JSON.stringify({ version: 1, topics, bookmarks }, null, 2), {
+        name: "amber-export.json",
+      });
+      for (const sub of ["archives", "assets"]) {
+        const dir = path.join(dataDir, sub);
+        if (fs.existsSync(dir)) zip.directory(dir, sub);
+      }
+      zip.finalize();
+      c.header("Content-Type", "application/zip");
+      c.header("Content-Disposition", 'attachment; filename="amber-backup.zip"');
+      return c.body(Readable.toWeb(out) as ReadableStream);
+    }
 
     if (format === "json") {
       const topics = db.prepare("SELECT * FROM topics ORDER BY name").all();
@@ -22,7 +45,7 @@ export function exportRoutes(db: Database.Database): Hono {
       return c.body(toNetscape(bookmarks));
     }
 
-    return c.json({ error: "format must be json or html" }, 400);
+    return c.json({ error: "format must be json, html or zip" }, 400);
   });
 
   return app;

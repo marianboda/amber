@@ -66,9 +66,29 @@ api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));
 api.route("/bookmarks", bookmarkRoutes(db, config));
 api.route("/topics", topicRoutes(db));
 api.route("/import", importRoutes(db));
-api.route("/export", exportRoutes(db));
+api.route("/export", exportRoutes(db, config.dataDir));
 
 app.route("/api", api);
+
+// Cached thumbnails/favicons. Served without auth so <img> tags work; paths
+// are uuid/hash-named (not enumerable) and contain images only.
+app.get("/assets/:kind/:file", (c) => {
+  const kind = c.req.param("kind");
+  const file = c.req.param("file");
+  if (!["thumbs", "favicons"].includes(kind) || !/^[\w.-]+$/.test(file)) {
+    return c.json({ error: "bad path" }, 400);
+  }
+  const full = path.join(config.dataDir, "assets", kind, file);
+  if (!fs.existsSync(full)) return c.json({ error: "not found" }, 404);
+  const ext = file.split(".").pop() ?? "";
+  const types: Record<string, string> = {
+    png: "image/png", jpg: "image/jpeg", webp: "image/webp", gif: "image/gif",
+    svg: "image/svg+xml", ico: "image/x-icon", avif: "image/avif", img: "application/octet-stream",
+  };
+  c.header("Content-Type", types[ext] ?? "application/octet-stream");
+  c.header("Cache-Control", "public, max-age=31536000, immutable");
+  return c.body(fs.readFileSync(full));
+});
 
 // Web UI: serve the built Svelte app when web/dist exists (repo layout or Docker).
 const webDist = ["../../web/dist", "../web/dist"]

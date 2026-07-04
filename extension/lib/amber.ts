@@ -30,6 +30,7 @@ export interface SaveArgs {
 export interface SaveResult {
   id: string;
   duplicate?: boolean;
+  saved_at?: number; // present on duplicates: when it was first saved
 }
 
 export async function saveBookmark(args: SaveArgs): Promise<SaveResult> {

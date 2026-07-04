@@ -27,6 +27,7 @@ export interface Bookmark {
   enrich_status: "pending" | "done" | "failed";
   fetch_status: "pending" | "ok" | "dead";
   archive_ref: string | null;
+  content_text: string | null;
   topics: Topic[];
 }
 
@@ -82,7 +83,18 @@ export const api = {
       body: JSON.stringify({ url, saved_from: "api", source_detail: "web-ui" }),
     }),
   topics: () => request("/topics") as Promise<{ topics: Topic[] }>,
-  exportUrl: (format: "json" | "html") => `/api/export?format=${format}`,
+  exportUrl: (format: "json" | "html" | "zip") => `/api/export?format=${format}`,
+  retryFailed: () =>
+    request("/bookmarks/retry-failed", { method: "POST" }) as Promise<{ retried: number }>,
+  importList: () =>
+    request("/import") as Promise<{
+      imports: {
+        job_id: string;
+        status: string;
+        filename: string;
+        progress: { total: number; imported: number; duplicates: number; invalid: number } | null;
+      }[];
+    }>,
   importFile: (file: File) => {
     const form = new FormData();
     form.append("file", file);

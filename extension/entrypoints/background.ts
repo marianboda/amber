@@ -36,7 +36,10 @@ export default defineBackground(() => {
   async function save(tabId: number, args: SaveArgs): Promise<string | null> {
     try {
       const result = await saveBookmark(args);
-      await toast(tabId, result.duplicate ? "Already in Amber" : "Saved ✓", "ok");
+      const dupText = result.saved_at
+        ? `Already in Amber — first saved ${new Date(result.saved_at * 1000).toLocaleDateString()}`
+        : "Already in Amber";
+      await toast(tabId, result.duplicate ? dupText : "Saved ✓", "ok");
       if (!result.duplicate) {
         waitForGist(result.id).then((gist) => {
           if (gist) toast(tabId, gist, "gist");
