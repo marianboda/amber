@@ -11,6 +11,7 @@ export const store = $state({
   q: "",
   type: "",
   topic: "",
+  read: "" as "" | "0" | "1",
   // ui
   view: "grid" as "grid" | "list",
   detailId: null as string | null,
@@ -22,6 +23,7 @@ function filterParams(): Record<string, string> {
   if (store.q) p.q = store.q;
   if (store.type) p.type = store.type;
   if (store.topic) p.topic = store.topic;
+  if (store.read) p.read = store.read;
   return p;
 }
 

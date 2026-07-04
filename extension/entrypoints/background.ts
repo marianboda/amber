@@ -20,6 +20,7 @@ export default defineBackground(() => {
       url: tab.url,
       note: note || undefined,
       saved_from: "extension",
+      archive_coming: true,
     });
     // Archive the rendered page (assets inlined) — works behind logins and
     // survives dead URLs. Runs after the save toast; best-effort.

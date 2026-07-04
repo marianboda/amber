@@ -10,6 +10,17 @@ import { ensureUnsortedTopic, topicsForBookmark, setBookmarkTopics } from "./top
 
 const SAVED_FROM = new Set(["extension", "share_sheet", "context_menu", "import", "api"]);
 
+// Every whitespace-separated term becomes a quoted prefix token, ANDed:
+// `rust async` → `"rust"* "async"*`. Quoting neutralizes FTS5 operator syntax.
+function ftsQuery(q: string): string | null {
+  const terms = q
+    .split(/\s+/)
+    .map((t) => t.replace(/"/g, "").trim())
+    .filter(Boolean);
+  if (!terms.length) return null;
+  return terms.map((t) => `"${t}"*`).join(" ");
+}
+
 function scrubScripts(html: string): string {
   return html
     .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
@@ -44,6 +55,10 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     }
 
     const id = randomUUID();
+    // archive_coming: the client will PUT a page snapshot right after this
+    // save; defer enrichment to that upload instead of running it twice.
+    // A periodic sweep re-enqueues the job if the snapshot never arrives.
+    const deferEnrich = body.archive_coming === true;
     const savedAt =
       typeof body.saved_at === "number" ? body.saved_at : Math.floor(Date.now() / 1000);
     db.prepare(
@@ -65,7 +80,7 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       body.source_detail ?? null,
       body.topic_hint ?? null
     );
-    enqueueJob(db, "enrich", { bookmark_id: id });
+    if (!deferEnrich) enqueueJob(db, "enrich", { bookmark_id: id });
     return c.json({ id }, 201);
   });
 
@@ -80,9 +95,15 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       params.push(type);
     }
     if (q) {
-      where.push("(b.title LIKE ? OR b.gist LIKE ? OR b.note LIKE ?)");
-      const like = `%${q}%`;
-      params.push(like, like, like);
+      const match = ftsQuery(q);
+      if (match) {
+        where.push("b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)");
+        params.push(match);
+      } else {
+        where.push("(b.title LIKE ? OR b.gist LIKE ? OR b.note LIKE ?)");
+        const like = `%${q}%`;
+        params.push(like, like, like);
+      }
     }
     if (read === "0" || read === "1") {
       where.push("b.is_read = ?");
@@ -172,7 +193,11 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     const id = c.req.param("id");
     const exists = db.prepare("SELECT id FROM bookmarks WHERE id = ?").get(id);
     if (!exists) return c.json({ error: "not found" }, 404);
+    const MAX_ARCHIVE = 300 * 1024 * 1024;
+    const declared = Number(c.req.header("content-length") ?? 0);
+    if (declared > MAX_ARCHIVE) return c.json({ error: "archive too large (300MB max)" }, 413);
     const html = await c.req.text();
+    if (html.length > MAX_ARCHIVE) return c.json({ error: "archive too large (300MB max)" }, 413);
     if (!html || html.length < 100) return c.json({ error: "empty archive" }, 400);
     const dir = path.join(config.dataDir, "archives");
     fs.mkdirSync(dir, { recursive: true });

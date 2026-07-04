@@ -24,6 +24,7 @@ export interface SaveArgs {
   note?: string;
   saved_from: "extension" | "context_menu";
   referrer?: string;
+  archive_coming?: boolean; // server defers enrichment until the snapshot PUT
 }
 
 export interface SaveResult {
@@ -66,10 +67,11 @@ export async function uploadArchive(id: string, html: string): Promise<void> {
   if (!res.ok) throw new Error(`archive upload HTTP ${res.status}`);
 }
 
-// Poll enrichment status ~2s until done; give up silently after ~10s (design §6.1).
+// Poll enrichment status ~2s until done; give up silently after ~24s
+// (enrichment now waits for the snapshot upload, so allow extra time).
 export async function waitForGist(id: string): Promise<string | null> {
   const settings = await getSettings();
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 12; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     try {
       const res = await fetch(`${settings.serverUrl}/api/bookmarks/${id}/status`, {

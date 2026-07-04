@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import fs from "node:fs";
@@ -23,11 +24,42 @@ startWorker(db, {
   import: (payload, jobId) => runImport(db, payload, jobId),
 });
 
+// Housekeeping: purge finished jobs, and rescue bookmarks whose deferred
+// enrichment never happened (archive_coming save whose snapshot never arrived).
+function maintenance() {
+  const now = Math.floor(Date.now() / 1000);
+  db.prepare("DELETE FROM jobs WHERE status = 'done' AND updated_at < ?").run(now - 7 * 86400);
+  db.prepare("DELETE FROM jobs WHERE status = 'failed' AND updated_at < ?").run(now - 30 * 86400);
+  const orphans = db
+    .prepare(
+      `SELECT b.id FROM bookmarks b
+       WHERE b.enrich_status = 'pending' AND b.saved_at < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM jobs j
+           WHERE j.type = 'enrich' AND j.status IN ('pending', 'running')
+             AND j.payload LIKE '%' || b.id || '%'
+         )`
+    )
+    .all(now - 120) as { id: string }[];
+  for (const { id } of orphans) {
+    db.prepare(
+      `INSERT INTO jobs (id, type, payload, status, attempts, created_at, updated_at)
+       VALUES (?, 'enrich', ?, 'pending', 0, ?, ?)`
+    ).run(crypto.randomUUID(), JSON.stringify({ bookmark_id: id }), now, now);
+  }
+  if (orphans.length) console.log(`maintenance: rescued ${orphans.length} orphaned enrichment(s)`);
+}
+maintenance();
+setInterval(maintenance, 60_000);
+
 const app = new Hono();
 
 app.get("/health", (c) => c.json({ ok: true }));
 
 const api = new Hono();
+// CORS so the bookmarklet can POST from any page origin. Auth is still the
+// bearer token; CORS only lifts the browser's same-origin restriction.
+api.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type"] }));
 api.use("*", bearerAuth(config.authToken));
 
 api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));

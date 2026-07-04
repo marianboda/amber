@@ -79,6 +79,12 @@
     }
   }
 
+  function bookmarkletHref(): string {
+    const origin = location.origin;
+    const code = `(async()=>{try{const r=await fetch(${JSON.stringify(origin)}+"/api/bookmarks",{method:"POST",headers:{"Content-Type":"application/json",Authorization:"Bearer "+${JSON.stringify(getToken())}},body:JSON.stringify({url:location.href,note:String(getSelection()||"")||undefined,saved_from:"api",source_detail:"bookmarklet"})});const d=await r.json();alert(d.duplicate?"Already in Amber":r.ok?"Saved to Amber ✓":"Amber error: "+(d.error||r.status))}catch(e){alert("Amber unreachable")}})()`;
+    return `javascript:${encodeURIComponent(code)}`;
+  }
+
   async function download(format: "json" | "html") {
     const res = await fetch(api.exportUrl(format), {
       headers: { Authorization: `Bearer ${getToken()}` },
@@ -112,6 +118,15 @@
       <button onclick={quickSave}>Save</button>
       <span class="status">{saveMsg}</span>
     </div>
+  </section>
+
+  <section>
+    <h2>Bookmarklet</h2>
+    <p class="muted">
+      Drag to your bookmark bar — saves the current page from any browser, no extension needed.
+      Selected text becomes the note. (Embeds your token; keep your bookmarks private.)
+    </p>
+    <p><a class="bookmarklet" href={bookmarkletHref()}>🟠 Save to Amber</a></p>
   </section>
 
   <section>
@@ -223,5 +238,15 @@
   }
   code {
     font-size: 0.75rem;
+  }
+  .bookmarklet {
+    display: inline-block;
+    padding: 0.35rem 0.9rem;
+    border: 1px dashed var(--accent);
+    border-radius: 8px;
+    color: var(--accent);
+    text-decoration: none;
+    font-size: 0.85rem;
+    cursor: grab;
   }
 </style>

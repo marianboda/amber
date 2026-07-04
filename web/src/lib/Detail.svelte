@@ -40,14 +40,21 @@
     await api.remove(bookmark.id);
     removeBookmark(bookmark.id);
   }
+  let archiveUrl = $state("");
+
+  // Render the snapshot in a sandboxed iframe (no scripts, opaque origin) —
+  // a plain window.open(blobUrl) would run on this app's origin.
   async function openArchive() {
     if (!bookmark) return;
     const res = await fetch(`/api/bookmarks/${bookmark.id}/archive`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("amber_token") ?? ""}` },
     });
     if (!res.ok) return;
-    const blob = await res.blob();
-    window.open(URL.createObjectURL(blob), "_blank");
+    archiveUrl = URL.createObjectURL(await res.blob());
+  }
+  function closeArchive() {
+    URL.revokeObjectURL(archiveUrl);
+    archiveUrl = "";
   }
 </script>
 
@@ -95,6 +102,16 @@
       <button class="btn danger" onclick={del}>Delete</button>
     </div>
   </aside>
+{/if}
+
+{#if archiveUrl}
+  <div class="archive-overlay">
+    <div class="archive-bar">
+      <span>🗂 Archived copy — snapshot from save time</span>
+      <button class="close" onclick={closeArchive}>✕ Close</button>
+    </div>
+    <iframe src={archiveUrl} sandbox="" title="Archived copy"></iframe>
+  </div>
 {/if}
 
 <style>
@@ -224,5 +241,27 @@
   .btn.danger {
     color: #c0392b;
     border-color: #c0392b;
+  }
+  .archive-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+  }
+  .archive-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 1rem;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--muted);
+  }
+  .archive-overlay iframe {
+    flex: 1;
+    border: none;
+    background: #fff;
   }
 </style>

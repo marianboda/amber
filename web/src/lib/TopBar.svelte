@@ -16,6 +16,11 @@
     store.topic = store.topic === name ? "" : name;
     reload();
   }
+  // Quiet read filter (design §3): cycles all → unread → read, off by default.
+  function cycleRead() {
+    store.read = store.read === "" ? "0" : store.read === "0" ? "1" : "";
+    reload();
+  }
 </script>
 
 <header>
@@ -38,6 +43,9 @@
       </button>
     {/each}
     <span class="spacer"></span>
+    <button class="chip" class:active={store.read !== ""} onclick={cycleRead} title="Filter by read flag">
+      {store.read === "" ? "read: all" : store.read === "0" ? "unread" : "read ✓"}
+    </button>
     {#each CONTENT_TYPES as t}
       <button class="chip type" class:active={store.type === t} onclick={() => setType(t)} title={t}>
         {TYPE_ICONS[t]}
