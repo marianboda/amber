@@ -20,7 +20,7 @@ const config = loadConfig();
 const db = openDb(config.dbPath);
 
 startWorker(db, {
-  enrich: (payload) => enrichBookmark(db, config, payload.bookmark_id),
+  enrich: (payload, _jobId, signal) => enrichBookmark(db, config, payload.bookmark_id, signal),
   import: (payload, jobId) => runImport(db, payload, jobId),
 });
 

@@ -8,6 +8,7 @@ import type { Config } from "../src/config.js";
 import { bookmarkRoutes } from "../src/routes/bookmarks.js";
 import { topicRoutes } from "../src/routes/topics.js";
 import { exportRoutes } from "../src/routes/export.js";
+import { importRoutes } from "../src/routes/import.js";
 import { parseNetscape } from "../src/import/parse.js";
 import { startWorker } from "../src/queue.js";
 import { enqueueJob } from "../src/jobs.js";
@@ -33,6 +34,7 @@ beforeAll(() => {
   app.route("/bookmarks", bookmarkRoutes(db, config));
   app.route("/topics", topicRoutes(db));
   app.route("/export", exportRoutes(db, dir));
+  app.route("/import", importRoutes(db));
 });
 
 afterAll(() => {
@@ -281,6 +283,48 @@ describe("export", () => {
     expect(res.retried).toBeGreaterThanOrEqual(1);
     const row = db.prepare("SELECT enrich_status FROM bookmarks WHERE id = ?").get(created.id) as any;
     expect(row.enrich_status).toBe("pending");
+  });
+});
+
+describe("pass-4 fixes", () => {
+  it("favicon-only update does not disturb FTS results", async () => {
+    const created = await (
+      await app.request("/bookmarks", json({ url: "https://a.com/ftskeep", note: "searchable-marker" }))
+    ).json();
+    // populate an indexed field so it's findable
+    await app.request(`/bookmarks/${created.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "unique-fts-token" }),
+    });
+    const before = await (await app.request("/bookmarks?q=unique-fts-token")).json();
+    expect(before.bookmarks.map((b: any) => b.id)).toContain(created.id);
+    // a non-indexed column update (favicon) must not drop the FTS row
+    db.prepare("UPDATE bookmarks SET favicon_url = '/assets/favicons/x.ico' WHERE id = ?").run(created.id);
+    const after = await (await app.request("/bookmarks?q=unique-fts-token")).json();
+    expect(after.bookmarks.map((b: any) => b.id)).toContain(created.id);
+  });
+
+  it("import status is scoped to its own batch", async () => {
+    const { runImport } = await import("../src/import/run.js");
+    const items = [{ url: "https://batch.example/one", title: "One", addDate: null, folder: null }];
+    // Two imports, same filename — second finds the URL already present.
+    const j1 = "job-batch-1";
+    const j2 = "job-batch-2";
+    const now = Math.floor(Date.now() / 1000);
+    for (const id of [j1, j2]) {
+      db.prepare(
+        `INSERT INTO jobs (id, type, payload, status, attempts, created_at, updated_at)
+         VALUES (?, 'import', ?, 'pending', 0, ?, ?)`
+      ).run(id, JSON.stringify({ filename: "dup.html", items }), now, now);
+      await runImport(db, { filename: "dup.html", items } as any, id);
+    }
+    const s1 = await (await app.request(`/import/${j1}`)).json();
+    const s2 = await (await app.request(`/import/${j2}`)).json();
+    const total1 = Object.values(s1.enrichment as Record<string, number>).reduce((a, b) => a + b, 0);
+    const total2 = Object.values(s2.enrichment as Record<string, number>).reduce((a, b) => a + b, 0);
+    expect(total1).toBe(1); // batch 1 inserted its row
+    expect(total2).toBe(0); // batch 2 saw a duplicate, inserted nothing
   });
 });
 

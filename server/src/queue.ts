@@ -1,21 +1,32 @@
 import type Database from "better-sqlite3";
 import PQueue from "p-queue";
 
-export type JobHandler = (payload: any, jobId: string) => Promise<void>;
+export type JobHandler = (payload: any, jobId: string, signal: AbortSignal) => Promise<void>;
 
 const MAX_ATTEMPTS = 2;
 const JOB_TIMEOUT_MS = 180_000; // wedged handler can't hold a slot forever
 const LEASE_SECONDS = 600; // a 'running' row not touched in this long is stale
 
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+// Runs the handler with a timeout AND an abort signal, so a timed-out handler
+// is told to stop (via signal) rather than left mutating state behind a
+// requeue/fail decision.
+async function runWithTimeout(
+  fn: (signal: AbortSignal) => Promise<void>,
+  ms: number
+): Promise<void> {
+  const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`job timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error(`job timed out after ${ms}ms`));
+    }, ms);
   });
   try {
-    return await Promise.race([promise, timeout]);
+    await Promise.race([fn(controller.signal), timeout]);
   } finally {
     clearTimeout(timer!);
+    controller.abort(); // ensure the handler's signal fires even on normal finish
   }
 }
 
@@ -62,7 +73,10 @@ export function startWorker(
         const handler = handlers[job.type];
         try {
           if (!handler) throw new Error(`no handler for job type '${job.type}'`);
-          await withTimeout(handler(JSON.parse(job.payload), job.id), JOB_TIMEOUT_MS);
+          await runWithTimeout(
+            (signal) => handler(JSON.parse(job.payload), job.id, signal),
+            JOB_TIMEOUT_MS
+          );
           finish.run("done", null, now(), job.id);
         } catch (err: any) {
           const message = String(err?.message ?? err).slice(0, 500);

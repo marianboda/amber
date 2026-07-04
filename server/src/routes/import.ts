@@ -74,12 +74,14 @@ export function importRoutes(db: Database.Database): Hono {
     const filename = payload.filename;
 
     // Insert progress from the job itself; enrichment progress from the rows.
+    // Scope by import_batch (the job id) so two same-filename imports don't
+    // report each other's counts.
     const enrichment = db
       .prepare(
         `SELECT enrich_status, COUNT(*) AS n FROM bookmarks
-         WHERE saved_from = 'import' AND source_detail = ? GROUP BY enrich_status`
+         WHERE import_batch = ? GROUP BY enrich_status`
       )
-      .all(filename) as { enrich_status: string; n: number }[];
+      .all(job.id) as { enrich_status: string; n: number }[];
     const enrich: Record<string, number> = {};
     for (const row of enrichment) enrich[row.enrich_status] = row.n;
 

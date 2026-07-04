@@ -44,21 +44,36 @@ export function applyTopics(db: Database.Database, bookmarkId: string, names: st
 export async function enrichBookmark(
   db: Database.Database,
   config: Config,
-  bookmarkId: string
+  bookmarkId: string,
+  signal?: AbortSignal
 ): Promise<void> {
   const bookmark = db.prepare("SELECT * FROM bookmarks WHERE id = ?").get(bookmarkId) as any;
   if (!bookmark) return; // deleted since enqueue — nothing to do
 
   try {
-    await run(db, config, bookmark);
+    await run(db, config, bookmark, signal);
   } catch (err) {
+    // If the job was aborted (timeout), leave status pending so a clean re-run
+    // can redo it — don't stamp 'failed' on a cancellation.
+    if (signal?.aborted) throw err;
     // Job may still be retried by the queue; a later success overwrites this.
     db.prepare("UPDATE bookmarks SET enrich_status = 'failed' WHERE id = ?").run(bookmarkId);
     throw err;
   }
 }
 
-async function run(db: Database.Database, config: Config, bookmark: any): Promise<void> {
+// Throws if the job was aborted (timeout); called before each terminal DB
+// write so a timed-out handler stops mutating instead of racing the retry.
+function checkAborted(signal?: AbortSignal) {
+  if (signal?.aborted) throw new Error("enrichment aborted");
+}
+
+async function run(
+  db: Database.Database,
+  config: Config,
+  bookmark: any,
+  signal?: AbortSignal
+): Promise<void> {
   const bookmarkId: string = bookmark.id;
   const topicNames = vocabulary(db);
   let enrichment: Enrichment | null = null;
@@ -167,9 +182,12 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
            favicon_url = ?, og_image_url = ?,
            content_text = ?, fetch_status = 'ok' WHERE id = ?`
       ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
-      // Non-extension saves get a server-side archive of what was fetched.
+      // Non-extension saves get an archive of what was fetched. It swallows
+      // its own errors (returns false) so a write failure here never gets
+      // misclassified as a dead link by the catch below.
       await archiveFallback(db, config.dataDir, bookmarkId, page.finalUrl, page.html);
-    } catch {
+    } catch (err) {
+      if (signal?.aborted) throw err; // don't mark a cancelled fetch as dead
       // Dead link: keep the bookmark, classify from title/URL alone (design §8).
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
     }
@@ -179,6 +197,7 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
       await cacheAssets(db, config.dataDir, bookmarkId).catch(() => {});
       return;
     }
+    checkAborted(signal);
     enrichment = await enrichWithLLM(config.llm, {
       title,
       url: bookmark.url,
@@ -188,6 +207,7 @@ async function run(db: Database.Database, config: Config, bookmark: any): Promis
     });
   }
 
+  checkAborted(signal);
   db.prepare(
     "UPDATE bookmarks SET gist = ?, summary = ?, content_type = ?, enrich_status = 'done' WHERE id = ?"
   ).run(enrichment.gist, enrichment.summary, enrichment.content_type, bookmarkId);

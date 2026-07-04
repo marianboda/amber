@@ -46,8 +46,8 @@ export async function runImport(
   const findExisting = db.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
   const insert = db.prepare(
     `INSERT INTO bookmarks
-       (id, url, canonical_url, title, domain, saved_at, saved_from, source_detail, topic_hint)
-     VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?)`
+       (id, url, canonical_url, title, domain, saved_at, saved_from, source_detail, topic_hint, import_batch)
+     VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)`
   );
 
   const now = Math.floor(Date.now() / 1000);
@@ -66,7 +66,8 @@ export async function runImport(
           domainOf(item.url),
           item.addDate ?? now,
           payload.filename,
-          item.folder
+          item.folder,
+          jobId
         );
         enqueueJob(db, "enrich", { bookmark_id: id });
         progress.imported++;
