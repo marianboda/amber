@@ -52,6 +52,7 @@
           ? `Already in Amber — first saved ${new Date(res.saved_at * 1000).toLocaleDateString()}`
           : "Saved ✓"
       );
+      if (!res.duplicate) reload(); // surface the fresh card (initial load raced the save)
     } catch (e: any) {
       showToast(`Save failed: ${e?.message ?? "unknown error"}`);
     }

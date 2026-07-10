@@ -11,8 +11,8 @@ See [`amber-design-doc.md`](amber-design-doc.md) for the full product/architectu
 ```
 server/       Hono + TypeScript API, SQLite (FTS5), in-process job queue — source of truth
   src/        routes/, pipeline/ (fetch, extract, enrich, archive, assets), queue, auth, db
-  migrations/ 001..004, applied automatically on boot
-  test/       vitest (46 tests): unit + API + archive + queue recovery
+  migrations/ 001..006, applied automatically on boot
+  test/       vitest (105 tests): unit + API + archive + queue + restore + pipeline
 web/          Svelte 5 + Vite web UI, built static and served by the server
 extension/    WXT browser extension (Chrome MV3 + Firefox MV2), single-file page capture
 Dockerfile    two-stage build (web then server) for Dokku deploy
@@ -81,14 +81,14 @@ Provider auto-detection order: `OPENAI_API_KEY` → `GEMINI_API_KEY` → `AMBER_
 npm run dev          # tsx watch
 npm run build        # tsc → dist/
 npm start            # node dist/index.js
-npm test             # vitest (46 tests)
+npm test             # vitest (105 tests)
 npm run typecheck    # tsc --noEmit
 
 # web/
-npm run dev / build / check   # check = svelte-check + tsc
+npm run dev / build / check / test   # check = svelte-check + tsc; test = vitest
 
 # extension/
-npm run build / build:firefox / dev / zip
+npm run build / build:firefox / dev / zip / test
 ```
 
 ## Deploy
@@ -97,4 +97,4 @@ Dokku on the existing server; `git push dokku master` deploys. SQLite + archives
 
 ## Status
 
-v1 (server, web UI, import/export, extension) is built and tested. Full-text search, page archival, reader mode, and a zip backup were pulled forward from v2. Four independent code-review passes have been applied. Open items and the roadmap are in [`TODO.md`](TODO.md); the one deliberately-deferred design decision is the **topic vocabulary** approach (§3 of the design doc). See [`docs/STATUS.md`](docs/STATUS.md) for the current handover state.
+v1 (server, web UI, import/export, extension) is built and tested. Full-text search (bm25 relevance + snippets), page archival, an HTML reader mode, zip backup **and restore**, daily DB snapshots, a soft-delete trash, metadata-only bulk import, ops endpoints (`/api/jobs`, `/api/stats`), keyboard navigation, URL routing, bulk operations, a PWA share-target save path for Android, and an offline save queue in the extension are all in. The enhancement program that added these is tracked in [`docs/ENHANCEMENTS.md`](docs/ENHANCEMENTS.md). Open items and the roadmap are in [`TODO.md`](TODO.md); the one deliberately-deferred design decision is the **topic vocabulary** approach (§3 of the design doc). See [`docs/STATUS.md`](docs/STATUS.md) for the current handover state.

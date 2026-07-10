@@ -1,23 +1,27 @@
 # Amber — Handover Status
 
-Last updated: 2026-07-05. This file captures the state of the project at session handover to another machine. Pair it with `TODO.md` (phase checklist) and `CLAUDE.md` (working conventions).
+Last updated: 2026-07-10. This file captures the state of the project at session handover to another machine. Pair it with `TODO.md` (phase checklist), `docs/ENHANCEMENTS.md` (enhancement program, all batches done), and `CLAUDE.md` (working conventions).
 
 ## Where things stand
 
-v1 is built, tested, and reviewed. The whole thing runs locally today with `AMBER_TOKEN=devtoken npm run dev` in `server/`. Nothing here is a prototype — every phase below ends in a runnable, tested state.
+v1 is built, tested, and reviewed, plus a full enhancement program (8 batches, see `docs/ENHANCEMENTS.md`) is implemented. The whole thing runs locally today with `AMBER_TOKEN=devtoken npm run dev` in `server/`. Nothing here is a prototype — every phase below ends in a runnable, tested state.
 
 | Area | State |
 |---|---|
 | Server + API (CRUD, dedup, filters, topics, import/export) | Done, tested |
 | Enrichment pipeline (fetch, Defuddle, YouTube/Gemini branch, LLM, restart-safe queue) | Done, tested (Gemini path not run with a real key) |
 | Web UI (Svelte 5: library grid, filters, detail, reader, settings, bookmarklet) | Done |
-| Browser extension (WXT, Chrome MV3 + Firefox MV2, page capture) | Builds pass; not yet clicked live in a browser |
-| Full-text search (FTS5 over title/gist/note/content_text) | Done, tested — pulled forward from v2 |
-| Page archival (extension single-file + server-side monolith/raw fallback) | Done, tested |
+| Browser extension (WXT, Chrome MV3 + Firefox MV2, page capture, offline queue) | Builds pass; not yet clicked live in a browser |
+| Full-text search (FTS5, bm25 relevance + snippets) | Done, tested |
+| Page archival (extension single-file + server-side monolith/raw fallback with base-href) | Done, tested |
 | Cached thumbnails + favicons (link-rot immunity) | Done, tested |
-| Zip backup export (metadata + archives + assets) | Done, tested |
-| Test suite | 46 vitest tests, green (`cd server && npm test`) |
-| Deploy | Dockerfile + DEPLOY.md ready; **never actually deployed** |
+| Backup **and restore** (zip/JSON round trip incl. archives; daily DB snapshots; trash) | Done, tested |
+| Import at scale (chunked transactions, metadata-only mode, enrich-missing batches) | Done, tested |
+| Ops (`/api/jobs`, `/api/stats`, onError logging, DB-probing `/health`, graceful shutdown) | Done, tested |
+| Web UX (keyboard nav, hash routing, bulk ops, autosave notes, batched polling, a11y) | Done |
+| Mobile save path (PWA + Android share target) | Built; not yet installed on a phone |
+| Test suites | server 105 · web 9 · extension 6, all green |
+| Deploy | Dockerfile (non-root + healthcheck) + DEPLOY.md ready; **never actually deployed** |
 
 ## Not verified end-to-end (needs your keys / machine / a browser)
 
@@ -25,6 +29,8 @@ v1 is built, tested, and reviewed. The whole thing runs locally today with `AMBE
 2. **Dokku deploy** — `Dockerfile` + `DEPLOY.md` ready, never run on the server.
 3. **Safari extension** — `xcrun safari-web-extension-converter` step never run (needs Xcode).
 4. **Extension live** — builds and typechecks pass; logic tested, but not loaded and clicked in a real browser. Load `extension/.output/chrome-mv3` unpacked to try it.
+5. **PWA share target** — manifest + `/share` receiver built and smoke-tested over HTTP, but not installed on an Android device (needs the deployed HTTPS instance).
+6. **Keyboard nav / bulk ops / routing in a real browser** — svelte-check and unit tests pass; a quick manual click-through after deploy is recommended.
 
 ## The one open decision — do not resolve without the user
 
