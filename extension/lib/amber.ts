@@ -29,6 +29,15 @@ export interface SaveArgs {
   archive_coming?: boolean; // server defers enrichment until the snapshot PUT
 }
 
+// Server unreachable (fetch itself rejected) — distinct from a server error
+// response: these saves are queued locally and retried.
+export class OfflineError extends Error {
+  constructor() {
+    super("Amber unreachable");
+    this.name = "OfflineError";
+  }
+}
+
 export interface SaveResult {
   id: string;
   duplicate?: boolean;
@@ -40,19 +49,86 @@ export async function saveBookmark(args: SaveArgs): Promise<SaveResult> {
   if (!settings.serverUrl || !settings.token) {
     throw new Error("not configured — open extension options");
   }
-  const res = await fetch(`${settings.serverUrl}/api/bookmarks`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${settings.token}`,
-    },
-    body: JSON.stringify({ ...args, device: settings.device || undefined }),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${settings.serverUrl}/api/bookmarks`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${settings.token}`,
+      },
+      body: JSON.stringify({ ...args, device: settings.device || undefined }),
+    });
+  } catch {
+    throw new OfflineError();
+  }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}) as any);
     throw new Error(body.error ?? `HTTP ${res.status}`);
   }
   return res.json();
+}
+
+// ---- offline save queue -----------------------------------------------------
+// A save must never be lost to a napping self-hosted server: failed saves park
+// in storage.local and drain on the next action / alarm / browser start.
+
+interface QueuedSave {
+  args: SaveArgs;
+  queued_at: number;
+}
+
+export async function enqueueOffline(args: SaveArgs): Promise<number> {
+  const { amber_queue } = (await browser.storage.local.get("amber_queue")) as {
+    amber_queue?: QueuedSave[];
+  };
+  const queue = amber_queue ?? [];
+  // The moment is what matters; archive_coming can't survive a deferred save.
+  queue.push({ args: { ...args, archive_coming: undefined }, queued_at: Date.now() });
+  await browser.storage.local.set({ amber_queue: queue.slice(-200) });
+  return queue.length;
+}
+
+// Drains the queue front-to-back; stops at the first offline failure (server
+// still down). Server-side rejections (4xx) drop the item — retrying can't fix
+// those. Returns how many saves went through.
+export async function flushOfflineQueue(): Promise<number> {
+  const { amber_queue } = (await browser.storage.local.get("amber_queue")) as {
+    amber_queue?: QueuedSave[];
+  };
+  let queue = amber_queue ?? [];
+  if (!queue.length) return 0;
+  let flushed = 0;
+  while (queue.length) {
+    const item = queue[0];
+    try {
+      await saveBookmark(item.args);
+      flushed++;
+      queue = queue.slice(1);
+    } catch (err) {
+      if (err instanceof OfflineError) break;
+      queue = queue.slice(1); // rejected by the server — drop, don't loop
+    }
+  }
+  await browser.storage.local.set({ amber_queue: queue });
+  return flushed;
+}
+
+export async function offlineQueueSize(): Promise<number> {
+  const { amber_queue } = (await browser.storage.local.get("amber_queue")) as {
+    amber_queue?: QueuedSave[];
+  };
+  return amber_queue?.length ?? 0;
+}
+
+// Kick off enrichment for a bookmark whose promised snapshot never made it —
+// otherwise the server defers until the maintenance sweep notices (~2min).
+export async function triggerEnrich(id: string): Promise<void> {
+  const settings = await getSettings();
+  await fetch(`${settings.serverUrl}/api/bookmarks/${id}/retry`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${settings.token}` },
+  }).catch(() => {});
 }
 
 // Upload a self-contained page snapshot captured in the tab. Best-effort:
