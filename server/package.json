@@ -22,13 +22,15 @@
     "hono": "^4.12.27",
     "jsdom": "^29.1.1",
     "p-queue": "^9.3.0",
-    "undici": "^8.7.0"
+    "undici": "^8.7.0",
+    "yauzl": "^3.4.0"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/jsdom": "^28.0.3",
     "@types/node": "^26.1.0",
+    "@types/yauzl": "^3.4.0",
     "tsx": "^4.22.5",
     "typescript": "^6.0.3",
     "vitest": "^4.1.9"

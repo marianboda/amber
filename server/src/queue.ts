@@ -2,6 +2,9 @@ import type Database from "better-sqlite3";
 import PQueue from "p-queue";
 
 export type JobHandler = (payload: any, jobId: string, signal: AbortSignal) => Promise<void>;
+// Handlers can carry a per-type timeout (e.g. restore walks a multi-GB zip and
+// needs far longer than an enrich fetch).
+export type HandlerSpec = JobHandler | { handler: JobHandler; timeoutMs: number };
 
 const MAX_ATTEMPTS = 2;
 const JOB_TIMEOUT_MS = 180_000; // wedged handler can't hold a slot forever
@@ -43,13 +46,13 @@ export interface FailedJob {
 
 export function startWorker(
   db: Database.Database,
-  handlers: Record<string, JobHandler>,
+  handlers: Record<string, HandlerSpec>,
   {
     concurrency = 2,
     pollMs = 1000,
     onPermanentFailure = undefined as ((job: FailedJob) => void) | undefined,
   } = {}
-): () => void {
+): () => Promise<void> {
   const executor = new PQueue({ concurrency });
 
   const recovered = db
@@ -81,12 +84,14 @@ export function startWorker(
         | undefined;
       if (!job) break;
       executor.add(async () => {
-        const handler = handlers[job.type];
+        const spec = handlers[job.type];
         try {
-          if (!handler) throw new Error(`no handler for job type '${job.type}'`);
+          if (!spec) throw new Error(`no handler for job type '${job.type}'`);
+          const handler = typeof spec === "function" ? spec : spec.handler;
+          const timeoutMs = typeof spec === "function" ? JOB_TIMEOUT_MS : spec.timeoutMs;
           await runWithTimeout(
             (signal) => handler(JSON.parse(job.payload), job.id, signal),
-            JOB_TIMEOUT_MS
+            timeoutMs
           );
           finish.run("done", null, now(), job.id);
         } catch (err: any) {
@@ -113,5 +118,11 @@ export function startWorker(
 
   const interval = setInterval(tick, pollMs);
   tick();
-  return () => clearInterval(interval);
+  // Stop claiming new jobs, then wait for in-flight ones — a graceful shutdown
+  // must not close the DB under a handler mid-write.
+  return async () => {
+    clearInterval(interval);
+    executor.clear();
+    await executor.onIdle();
+  };
 }

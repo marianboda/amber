@@ -14,6 +14,10 @@ export function openDb(dbPath: string): Database.Database {
   const db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
+  // WAL-safe durability level; large write-throughput win for bulk imports.
+  db.pragma("synchronous = NORMAL");
+  // Don't fail immediately if a backup/checkpoint briefly holds the lock.
+  db.pragma("busy_timeout = 5000");
   migrate(db);
   return db;
 }

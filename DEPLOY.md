@@ -39,6 +39,10 @@ Do **not** back up by copying `amber.sqlite` while the server is running: the
 database runs in WAL mode, and a raw copy that misses the `-wal` file can be
 inconsistent. Safe options:
 
-- `sqlite3 /var/lib/dokku/data/storage/amber/amber.sqlite ".backup /tmp/amber-backup.sqlite"`,
-  then sync that snapshot plus `/data/archives` and `/data/assets` off the host.
-- Full export including archives: `GET /api/export?format=zip`.
+- The server writes a consistent daily snapshot to `/data/backups/` (7 kept)
+  using SQLite's online backup API — sync that directory plus `/data/archives`
+  and `/data/assets` off the host.
+- On demand: `sqlite3 /var/lib/dokku/data/storage/amber/amber.sqlite ".backup /tmp/amber-backup.sqlite"`.
+- Full export including archives: `GET /api/export?format=zip` — which is also
+  the restore format: `POST /api/import` (Content-Type: application/zip)
+  rebuilds a fresh server from it, archives included.

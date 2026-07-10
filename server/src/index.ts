@@ -16,17 +16,24 @@ import { startWorker } from "./queue.js";
 import { enrichBookmark } from "./pipeline/enrich.js";
 import { runImport } from "./import/run.js";
 import { runMaintenance } from "./maintenance.js";
+import { runRestore } from "./import/restore.js";
+import { runBackup } from "./backup.js";
 import { opsRoutes } from "./routes/ops.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
 
-startWorker(
+const stopWorker = startWorker(
   db,
   {
     enrich: (payload, _jobId, signal) =>
       enrichBookmark(db, config, payload.bookmark_id, signal, payload.mode),
     import: (payload, jobId, signal) => runImport(db, payload, jobId, signal),
+    // Restores walk a potentially multi-GB backup zip — give them a real budget.
+    restore: {
+      handler: (payload, jobId, signal) => runRestore(db, config.dataDir, payload, jobId, signal),
+      timeoutMs: 30 * 60_000,
+    },
   },
   {
     // A permanently-failed enrichment must surface as a failed bookmark:
@@ -43,11 +50,20 @@ startWorker(
 );
 
 function maintenance() {
-  const rescued = runMaintenance(db);
+  const rescued = runMaintenance(db, config.dataDir);
   if (rescued) console.log(`maintenance: rescued ${rescued} orphaned enrichment(s)`);
 }
 maintenance();
-setInterval(maintenance, 60_000);
+const maintenanceTimer = setInterval(maintenance, 60_000);
+
+// Daily consistent DB snapshot (runBackup no-ops when today's exists).
+function backup() {
+  runBackup(db, config.dataDir)
+    .then((file) => file && console.log(`backup: wrote ${file}`))
+    .catch((err) => console.error("backup failed:", err));
+}
+backup();
+const backupTimer = setInterval(backup, 3600_000);
 
 const app = new Hono();
 
@@ -75,7 +91,7 @@ api.use("*", bearerAuth(config.authToken));
 api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));
 api.route("/bookmarks", bookmarkRoutes(db, config));
 api.route("/topics", topicRoutes(db));
-api.route("/import", importRoutes(db));
+api.route("/import", importRoutes(db, config.dataDir));
 api.route("/export", exportRoutes(db, config.dataDir));
 api.route("/", opsRoutes(db, config.dataDir));
 
@@ -115,8 +131,30 @@ if (webDist) {
   console.log(`serving web UI from ${webDist}`);
 }
 
-serve({ fetch: app.fetch, port: config.port }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`amber server listening on :${info.port}, db at ${config.dbPath}`);
 });
+
+// Graceful shutdown: stop claiming jobs, let in-flight ones finish (they're
+// resumable anyway, but a clean DB close checkpoints the WAL), then exit.
+let shuttingDown = false;
+async function shutdown(sig: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${sig} received, shutting down`);
+  clearInterval(maintenanceTimer);
+  clearInterval(backupTimer);
+  server.close(() => {});
+  // Don't wait forever on a wedged handler — its job re-runs on next boot.
+  await Promise.race([stopWorker(), new Promise((r) => setTimeout(r, 10_000))]);
+  try {
+    db.close();
+  } catch (err) {
+    console.error("db close failed:", err);
+  }
+  process.exit(0);
+}
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
 
 export { app, db, config };

@@ -32,7 +32,7 @@ beforeAll(() => {
   };
   app = new Hono();
   app.route("/bookmarks", bookmarkRoutes(db, config));
-  app.route("/import", importRoutes(db));
+  app.route("/import", importRoutes(db, dir));
   app.route("/", opsRoutes(db, dir));
 });
 

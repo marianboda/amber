@@ -34,7 +34,7 @@ beforeAll(() => {
   app.route("/bookmarks", bookmarkRoutes(db, config));
   app.route("/topics", topicRoutes(db));
   app.route("/export", exportRoutes(db, dir));
-  app.route("/import", importRoutes(db));
+  app.route("/import", importRoutes(db, dir));
 });
 
 afterAll(() => {

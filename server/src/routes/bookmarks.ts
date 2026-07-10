@@ -230,9 +230,33 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     return c.json(row);
   });
 
+  // Delete is soft: the row (with topics) and its per-bookmark files move to
+  // trash/, purged after 30 days by maintenance — a mis-click in a permanent
+  // library must be recoverable, and archives must not leak disk forever.
   app.delete("/:id", (c) => {
-    const result = db.prepare("DELETE FROM bookmarks WHERE id = ?").run(c.req.param("id"));
-    if (result.changes === 0) return c.json({ error: "not found" }, 404);
+    const id = c.req.param("id");
+    const row = db.prepare("SELECT * FROM bookmarks WHERE id = ?").get(id) as any;
+    if (!row) return c.json({ error: "not found" }, 404);
+    row.topics = topicsForBookmark(db, id);
+
+    const trashDir = path.join(config.dataDir, "trash");
+    fs.mkdirSync(trashDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(trashDir, `${id}.json`),
+      JSON.stringify({ deleted_at: Math.floor(Date.now() / 1000), bookmark: row }, null, 2)
+    );
+    // Archive + cached thumb are keyed by bookmark id; favicons are shared by
+    // domain and stay. Move (don't delete) so restore-from-trash keeps them.
+    if (row.archive_ref) {
+      const file = path.join(config.dataDir, row.archive_ref);
+      if (fs.existsSync(file)) fs.renameSync(file, path.join(trashDir, path.basename(file)));
+    }
+    if (row.og_image_url?.startsWith("/assets/thumbs/")) {
+      const file = path.join(config.dataDir, "assets", "thumbs", path.basename(row.og_image_url));
+      if (fs.existsSync(file)) fs.renameSync(file, path.join(trashDir, path.basename(file)));
+    }
+
+    db.prepare("DELETE FROM bookmarks WHERE id = ?").run(id);
     return c.json({ ok: true });
   });
 

@@ -1,15 +1,52 @@
 import { Hono } from "hono";
 import type Database from "better-sqlite3";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { detectFormat, parseNetscape, parseLines } from "../import/parse.js";
 import { dedupeItems } from "../import/run.js";
 import { enqueueJob } from "../jobs.js";
-import { readStreamLimited } from "../http-util.js";
+import { readStreamLimited, streamToFileLimited } from "../http-util.js";
 
-export function importRoutes(db: Database.Database): Hono {
+const MAX_RESTORE = 4 * 1024 * 1024 * 1024; // backup zips carry full archives
+
+function looksLikeAmberExport(text: string): boolean {
+  if (!text.trimStart().startsWith("{")) return false;
+  try {
+    const data = JSON.parse(text);
+    return data?.version === 1 && Array.isArray(data?.bookmarks);
+  } catch {
+    return false;
+  }
+}
+
+export function importRoutes(db: Database.Database, dataDir: string): Hono {
   const app = new Hono();
+
+  // Stage an uploaded backup under tmp/ and hand it to the restore job.
+  const stageRestore = (name: string, filename: string) => {
+    const jobId = enqueueJob(db, "restore", { file: `tmp/${name}`, filename });
+    return { job_id: jobId, restore: true };
+  };
 
   app.post("/", async (c) => {
     const MAX_IMPORT = 100 * 1024 * 1024;
+    const contentTypeHeader = c.req.header("content-type") ?? "";
+
+    // Backup zips are restored, not parsed — and can be multi-GB, so they
+    // stream straight to disk instead of buffering.
+    if (contentTypeHeader.includes("application/zip")) {
+      const name = `restore-${randomUUID()}.zip`;
+      const written = await streamToFileLimited(
+        c.req.raw.body,
+        path.join(dataDir, "tmp", name),
+        MAX_RESTORE
+      );
+      if (written === null) return c.json({ error: "backup too large (4GB max)" }, 413);
+      if (written === 0) return c.json({ error: "empty upload" }, 400);
+      return c.json(stageRestore(name, "amber-backup.zip"), 202);
+    }
+
     if (Number(c.req.header("content-length") ?? 0) > MAX_IMPORT) {
       return c.json({ error: "import too large (100MB max)" }, 413);
     }
@@ -30,11 +67,35 @@ export function importRoutes(db: Database.Database): Hono {
       if (!(file instanceof File)) return c.json({ error: "multipart field 'file' required" }, 400);
       filename = file.name || filename;
       if (form.get("enrich") === "metadata") enrich = "metadata";
-      text = await file.text();
+      const bytes = Buffer.from(await file.arrayBuffer());
+      if (bytes.subarray(0, 2).toString("latin1") === "PK") {
+        // A backup zip uploaded through the form (bigger ones: raw-body POST
+        // with Content-Type: application/zip, which streams to disk).
+        const name = `restore-${randomUUID()}.zip`;
+        fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
+        fs.writeFileSync(path.join(dataDir, "tmp", name), bytes);
+        return c.json(stageRestore(name, filename), 202);
+      }
+      text = bytes.toString("utf8");
     } else {
+      if (buffered.subarray(0, 2).toString("latin1") === "PK") {
+        const name = `restore-${randomUUID()}.zip`;
+        fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
+        fs.writeFileSync(path.join(dataDir, "tmp", name), buffered);
+        return c.json(stageRestore(name, "amber-backup.zip"), 202);
+      }
       text = buffered.toString("utf8");
     }
     if (!text.trim()) return c.json({ error: "empty import" }, 400);
+
+    // An Amber JSON export restores full fidelity (notes, topics, read flags,
+    // enrichment) instead of being re-imported as bare URLs.
+    if (looksLikeAmberExport(text)) {
+      const name = `restore-${randomUUID()}.json`;
+      fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
+      fs.writeFileSync(path.join(dataDir, "tmp", name), text);
+      return c.json(stageRestore(name, filename === "import" ? "amber-export.json" : filename), 202);
+    }
 
     const parsed = detectFormat(text) === "netscape" ? parseNetscape(text) : parseLines(text);
     const { items } = dedupeItems(parsed);
