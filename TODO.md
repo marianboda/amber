@@ -68,9 +68,14 @@ Work top to bottom. Each task small enough to finish in one sitting. v1 = phases
 
 ## Pulled forward from v2 (done)
 - [x] FTS5 full-text search over title/gist/note/content_text (trigger-synced, prefix matching)
-- [x] Page archival with assets — extension-side single-file capture (works behind auth; server-side Monolith fallback for non-extension saves still open)
-- [x] Test suite: 34 tests (vitest) — canonicalization, parsers, dedup, scrubber, API, archive, queue recovery
+- [x] Page archival with assets — extension-side single-file capture (works behind auth)
+- [x] Server-side archival fallback (Monolith/raw) for import/API/share-sheet saves
+- [x] Reader mode in the web UI
+- [x] Test suite (vitest) — canonicalization, parsers, dedup, scrubber, API, archive, queue recovery, maintenance/ops (see `server/test/`)
 - [x] Bookmarklet (Settings, needs CORS — added)
+- [x] Import survival kit: metadata-only import mode, `POST /bookmarks/enrich-missing`, `GET /api/jobs` + `/api/stats`, chunked import transactions, indexed orphan sweep
 
 ## v2 backlog (not now)
-- Server-side archival fallback (Monolith) for import/API/share-sheet saves; reader mode; yt-dlp archiving; "first saved {date}" dedup UX; related items via embeddings
+- yt-dlp archiving; "first saved {date}" dedup UX; related items via embeddings
+
+Current enhancement work is tracked in `docs/ENHANCEMENTS.md`.

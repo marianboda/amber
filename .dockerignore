@@ -1,0 +1,11 @@
+.git
+.claude
+docs
+extension
+**/node_modules
+**/dist
+**/.output
+**/.wxt
+server/data
+*.md
+.DS_Store

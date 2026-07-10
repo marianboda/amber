@@ -23,4 +23,11 @@ ENV NODE_ENV=production
 ENV AMBER_DATA_DIR=/data
 EXPOSE 3000
 
+# Unprivileged runtime user — the /data mount must be writable by uid 1000
+# (see DEPLOY.md: chown the host storage directory).
+USER node
+
+HEALTHCHECK --interval=60s --timeout=5s --start-period=15s \
+  CMD ["node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
 CMD ["node", "dist/index.js"]
