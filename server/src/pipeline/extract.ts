@@ -6,6 +6,7 @@ export interface ExtractedPage {
   favicon: string | null;
   image: string | null;
   text: string | null; // plain text of the main content
+  contentHtml: string | null; // main-content HTML (unsanitized — caller scrubs)
 }
 
 export async function extractPage(html: string, url: string): Promise<ExtractedPage> {
@@ -17,6 +18,7 @@ export async function extractPage(html: string, url: string): Promise<ExtractedP
     favicon: absolute(result.favicon, url),
     image: absolute(result.image, url),
     text: text && text.trim().length > 0 ? text : null,
+    contentHtml: result.content && text && text.trim().length > 0 ? result.content : null,
   };
 }
 

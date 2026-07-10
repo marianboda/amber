@@ -35,6 +35,17 @@
     store.domain = store.domain === bookmark.domain ? "" : bookmark.domain ?? "";
     reload();
   }
+  // FTS snippets are plain column text with our <mark> markers — escape
+  // everything, then let only those markers back through.
+  function renderSnippet(s: string): string {
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/&lt;mark&gt;/g, "<mark>")
+      .replace(/&lt;\/mark&gt;/g, "</mark>");
+  }
+
   // o = open original, r = toggle read, x = select — while a card has focus.
   function onKeydown(e: KeyboardEvent) {
     if (e.key === "o") {
@@ -107,6 +118,10 @@
       <button class="retry" onclick={retry} title="Enrichment failed — retry">⟳ retry</button>
     {:else if bookmark.gist}
       <p class="gist">{bookmark.gist}</p>
+    {/if}
+    {#if bookmark.snippet}
+      <!-- eslint-disable-next-line svelte/no-at-html-tags — escaped, only our <mark> survives -->
+      <p class="snippet">{@html renderSnippet(bookmark.snippet)}</p>
     {/if}
     {#if bookmark.topics.length}
       <div class="chips">
@@ -257,6 +272,18 @@
     color: var(--muted);
     margin: 0;
     line-height: 1.4;
+  }
+  .snippet {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin: 0;
+    line-height: 1.4;
+  }
+  .snippet :global(mark) {
+    background: rgb(230 168 60 / 0.35);
+    color: inherit;
+    border-radius: 2px;
+    padding: 0 1px;
   }
   .card.list .gist {
     display: -webkit-box;

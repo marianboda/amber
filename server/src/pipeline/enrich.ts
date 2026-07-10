@@ -4,7 +4,8 @@ import path from "node:path";
 import type { Config } from "../config.js";
 import { canonicalize, domainOf } from "../canonical.js";
 import { fetchPage } from "./fetcher.js";
-import { extractPage } from "./extract.js";
+import { extractPage, type ExtractedPage } from "./extract.js";
+import { scrubScripts } from "../routes/bookmarks.js";
 import { enrichWithLLM, type Enrichment } from "./llm.js";
 import { isYouTube, fetchOEmbed, enrichYouTubeWithGemini } from "./youtube.js";
 import { cacheAssets } from "./assets.js";
@@ -21,6 +22,14 @@ function readArchive(dataDir: string, archiveRef: string | null): string | null 
 
 function vocabulary(db: Database.Database): string[] {
   return (db.prepare("SELECT name FROM topics").all() as { name: string }[]).map((r) => r.name);
+}
+
+// Reader HTML: scrubbed of scripts like archives (it renders in the web UI's
+// sandboxed iframe) and capped so one giant page can't bloat the row.
+const MAX_CONTENT_HTML = 2 * 1024 * 1024;
+function readerHtml(extracted: ExtractedPage): string | null {
+  if (!extracted.contentHtml) return null;
+  return scrubScripts(extracted.contentHtml).slice(0, MAX_CONTENT_HTML);
 }
 
 // Idempotent: replaces previous AI-assigned topics (re-runs don't accumulate
@@ -127,9 +136,10 @@ async function run(
         `UPDATE bookmarks SET
            title = CASE WHEN title_locked = 1 THEN title ELSE ? END,
            favicon_url = COALESCE(favicon_url, ?),
-           og_image_url = COALESCE(og_image_url, ?), content_text = ?, fetch_status = 'ok'
+           og_image_url = COALESCE(og_image_url, ?), content_text = ?, content_html = ?,
+           fetch_status = 'ok'
          WHERE id = ?`
-      ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
+      ).run(title, extracted.favicon, extracted.image, extracted.text, readerHtml(extracted), bookmarkId);
     } else
     try {
       const page = await fetchPage(bookmark.url);
@@ -177,20 +187,26 @@ async function run(
         );
       }
 
-      const extracted = await extractPage(page.html, page.finalUrl);
-      title = extracted.title ?? title;
-      // Fallback to og:description when extraction yields nothing (SPA, paywall).
-      text = extracted.text ?? extracted.description;
-      db.prepare(
-        `UPDATE bookmarks SET
-           title = CASE WHEN title_locked = 1 THEN title ELSE ? END,
-           favicon_url = ?, og_image_url = ?,
-           content_text = ?, fetch_status = 'ok' WHERE id = ?`
-      ).run(title, extracted.favicon, extracted.image, extracted.text, bookmarkId);
-      // Non-extension saves get an archive of what was fetched. It swallows
-      // its own errors (returns false) so a write failure here never gets
-      // misclassified as a dead link by the catch below.
-      await archiveFallback(db, config.dataDir, bookmarkId, page.finalUrl, page.html);
+      if (!page.isHtml) {
+        // PDF/image/binary: no markup to extract or archive — keep the
+        // bookmark, classify from title/URL alone, don't pollute FTS.
+        db.prepare("UPDATE bookmarks SET fetch_status = 'ok' WHERE id = ?").run(bookmarkId);
+      } else {
+        const extracted = await extractPage(page.html, page.finalUrl);
+        title = extracted.title ?? title;
+        // Fallback to og:description when extraction yields nothing (SPA, paywall).
+        text = extracted.text ?? extracted.description;
+        db.prepare(
+          `UPDATE bookmarks SET
+             title = CASE WHEN title_locked = 1 THEN title ELSE ? END,
+             favicon_url = ?, og_image_url = ?,
+             content_text = ?, content_html = ?, fetch_status = 'ok' WHERE id = ?`
+        ).run(title, extracted.favicon, extracted.image, extracted.text, readerHtml(extracted), bookmarkId);
+        // Non-extension saves get an archive of what was fetched. It swallows
+        // its own errors (returns false) so a write failure here never gets
+        // misclassified as a dead link by the catch below.
+        await archiveFallback(db, config.dataDir, bookmarkId, page.finalUrl, page.html);
+      }
     } catch (err) {
       if (signal?.aborted) throw err; // don't mark a cancelled fetch as dead
       // Dead link: keep the bookmark, classify from title/URL alone (design §8).

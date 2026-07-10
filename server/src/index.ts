@@ -4,6 +4,7 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import fs from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { openDb } from "./db.js";
@@ -117,7 +118,7 @@ app.get("/assets/:kind/:file", (c) => {
   // SVGs from untrusted pages are active content — neutralize direct opens.
   c.header("Content-Security-Policy", "sandbox; script-src 'none'");
   c.header("X-Content-Type-Options", "nosniff");
-  return c.body(fs.readFileSync(full));
+  return c.body(Readable.toWeb(fs.createReadStream(full)) as ReadableStream);
 });
 
 // Web UI: serve the built Svelte app when web/dist exists (repo layout or Docker).

@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { canonicalize, domainOf } from "../canonical.js";
 import { enqueueJob } from "../jobs.js";
 import { readTextLimited } from "../http-util.js";
@@ -138,16 +139,17 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       where.push("b.domain = ?");
       params.push(domain);
     }
-    if (q) {
-      const match = ftsQuery(q);
-      if (match) {
-        where.push("b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)");
-        params.push(match);
-      } else {
-        where.push("(b.title LIKE ? OR b.gist LIKE ? OR b.note LIKE ?)");
-        const like = `%${q}%`;
-        params.push(like, like, like);
-      }
+    // Search defaults to bm25 relevance (title > gist/note > content_text) with
+    // match snippets; sort=recent/oldest opts back into date order + cursor.
+    const match = q ? ftsQuery(q) : null;
+    const relevance = !!match && !oldest && sort !== "recent";
+    if (q && match && !relevance) {
+      where.push("b.rowid IN (SELECT rowid FROM bookmarks_fts WHERE bookmarks_fts MATCH ?)");
+      params.push(match);
+    } else if (q && !match) {
+      where.push("(b.title LIKE ? OR b.gist LIKE ? OR b.note LIKE ?)");
+      const like = `%${q}%`;
+      params.push(like, like, like);
     }
     if (read === "0" || read === "1") {
       where.push("b.is_read = ?");
@@ -188,18 +190,32 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
        b.device, b.referrer, b.source_detail, b.topic_hint, b.enrich_status,
        b.fetch_status, b.archive_ref, b.media_ref, b.media_status, b.title_locked,
        b.import_batch`;
-    const order = oldest ? "ASC" : "DESC";
-    const sql = `SELECT ${cardColumns} FROM bookmarks b
-                 ${where.length ? "WHERE " + where.join(" AND ") : ""}
-                 ORDER BY b.saved_at ${order}, b.id ${order} LIMIT ?`;
-    const rows = db.prepare(sql).all(...params, max) as any[];
+    let rows: any[];
+    if (relevance) {
+      // Best hits first; a common term over 100k rows would bury the right one
+      // under recency. No cursor — relevance beyond ~200 rows isn't navigation.
+      const sql = `SELECT ${cardColumns}, f.snip AS snippet FROM bookmarks b
+                   JOIN (SELECT rowid,
+                                bm25(bookmarks_fts, 10.0, 5.0, 5.0, 1.0) AS rank,
+                                snippet(bookmarks_fts, 3, '<mark>', '</mark>', ' … ', 12) AS snip
+                         FROM bookmarks_fts WHERE bookmarks_fts MATCH ?) f ON f.rowid = b.rowid
+                   ${where.length ? "WHERE " + where.join(" AND ") : ""}
+                   ORDER BY f.rank LIMIT ?`;
+      rows = db.prepare(sql).all(match, ...params, max) as any[];
+    } else {
+      const order = oldest ? "ASC" : "DESC";
+      const sql = `SELECT ${cardColumns} FROM bookmarks b
+                   ${where.length ? "WHERE " + where.join(" AND ") : ""}
+                   ORDER BY b.saved_at ${order}, b.id ${order} LIMIT ?`;
+      rows = db.prepare(sql).all(...params, max) as any[];
+    }
     const topicMap = topicsForBookmarks(db, rows.map((r) => r.id));
     for (const row of rows) row.topics = topicMap.get(row.id) ?? [];
     const last = rows[rows.length - 1];
-    const next = rows.length === max ? `${last.saved_at}.${last.id}` : null;
+    const next = !relevance && rows.length === max ? `${last.saved_at}.${last.id}` : null;
     return c.json({
       bookmarks: rows,
-      next_before: oldest ? null : next,
+      next_before: oldest || relevance ? null : next,
       next_after: oldest ? next : null,
     });
   });
@@ -344,7 +360,8 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     c.header("Content-Type", "text/html; charset=utf-8");
     // No script execution even if something slipped through the scrubs.
     c.header("Content-Security-Policy", "sandbox; script-src 'none'");
-    return c.body(fs.readFileSync(file));
+    // Streamed: archives run to 300MB and readFileSync would block the loop.
+    return c.body(Readable.toWeb(fs.createReadStream(file)) as ReadableStream);
   });
 
   // Enqueue LLM enrichment for rows that completed metadata-only (imported

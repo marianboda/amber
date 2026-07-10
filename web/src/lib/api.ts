@@ -28,7 +28,9 @@ export interface Bookmark {
   fetch_status: "pending" | "ok" | "dead";
   archive_ref: string | null;
   content_text: string | null;
+  content_html: string | null;
   topics: Topic[];
+  snippet?: string | null; // FTS match context, relevance-sorted search only
 }
 
 export function getToken(): string {

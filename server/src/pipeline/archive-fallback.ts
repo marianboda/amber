@@ -8,6 +8,20 @@ import { scrubScripts } from "../routes/bookmarks.js";
 
 const execFileAsync = promisify(execFile);
 
+// Point relative asset URLs back at the original origin. Respects an existing
+// <base>; otherwise inserts one right after <head> (or prepends).
+export function injectBase(html: string, url: string): string {
+  if (/<base\s/i.test(html)) return html;
+  const safeUrl = url.replace(/"/g, "&quot;");
+  const tag = `<base href="${safeUrl}">`;
+  const headMatch = html.match(/<head[^>]*>/i);
+  if (headMatch && headMatch.index !== undefined) {
+    const at = headMatch.index + headMatch[0].length;
+    return html.slice(0, at) + tag + html.slice(at);
+  }
+  return tag + html;
+}
+
 let monolithChecked = false;
 let monolithAvailable = false;
 
@@ -51,6 +65,7 @@ export async function archiveFallback(
     const file = path.join(dir, `${bookmarkId}.html`);
 
     let html = rawHtml;
+    let usedMonolith = false;
     if (await hasMonolith()) {
       const tmpDir = path.join(dataDir, "tmp");
       fs.mkdirSync(tmpDir, { recursive: true });
@@ -62,13 +77,19 @@ export async function archiveFallback(
           ["--no-js", "--isolate", "--silent", "--base-url", url, tmp],
           { timeout: 90_000, maxBuffer: 300 * 1024 * 1024 }
         );
-        if (stdout && stdout.length > 200) html = stdout;
+        if (stdout && stdout.length > 200) {
+          html = stdout;
+          usedMonolith = true;
+        }
       } catch {
         // monolith failed (timeout, sub-resource error) — raw HTML still stored
       } finally {
         fs.rmSync(tmp, { force: true });
       }
     }
+    // Raw (non-monolith) fallback keeps the page's relative asset URLs — served
+    // from Amber's origin they'd all 404 without a <base>.
+    if (!usedMonolith) html = injectBase(html, url);
 
     fs.writeFileSync(file, scrubScripts(html));
     db.prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?").run(

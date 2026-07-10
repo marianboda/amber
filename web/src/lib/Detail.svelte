@@ -179,7 +179,7 @@
 
     <div class="actions">
       <a class="btn" href={bookmark.url} target="_blank" rel="noopener">Open original ↗</a>
-      {#if bookmark.content_text}
+      {#if bookmark.content_text || bookmark.content_html}
         <button class="btn" onclick={() => (readerOpen = true)}>Read 📖</button>
       {/if}
       {#if bookmark.archive_ref}

@@ -145,10 +145,36 @@ const DESKTOP_UA =
 
 const MAX_HTML_BYTES = 3 * 1024 * 1024;
 
+const HTML_TYPES = /^(text\/html|application\/xhtml\+xml)\b/i;
+
 export interface FetchedPage {
   finalUrl: string;
   html: string;
   contentType: string;
+  // false = the URL is a PDF/image/binary: html holds no parseable markup and
+  // must not be fed to extraction or FTS.
+  isHtml: boolean;
+}
+
+// Decode using the declared charset (Content-Type header, then <meta charset>
+// / http-equiv sniffed from the first bytes). ISO-8859-2 pages are common on
+// .sk/.cz sites — utf8-decoding those puts mojibake in titles and FTS.
+export function decodeHtml(bytes: Buffer, contentTypeHeader: string): string {
+  let charset = contentTypeHeader.match(/charset=["']?([\w-]+)/i)?.[1];
+  if (!charset) {
+    const head = bytes.subarray(0, 2048).toString("latin1");
+    charset =
+      head.match(/<meta\s+charset=["']?([\w-]+)/i)?.[1] ??
+      head.match(/<meta[^>]+content=["'][^"']*charset=([\w-]+)/i)?.[1];
+  }
+  if (charset && !/^(utf-?8)$/i.test(charset)) {
+    try {
+      return new TextDecoder(charset.toLowerCase()).decode(bytes);
+    } catch {
+      /* unknown label — fall through to utf-8 */
+    }
+  }
+  return bytes.toString("utf8");
 }
 
 export async function fetchPage(url: string): Promise<FetchedPage> {
@@ -158,13 +184,23 @@ export async function fetchPage(url: string): Promise<FetchedPage> {
       signal: AbortSignal.timeout(20_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const contentType = res.headers.get("content-type") ?? "";
+    // Missing header: assume HTML (most common for pages that omit it).
+    const isHtml = contentType === "" || HTML_TYPES.test(contentType);
+    if (!isHtml) {
+      // PDF/image/binary — don't buffer megabytes we won't parse.
+      res.body?.cancel().catch(() => {});
+      return { finalUrl: res.url || url, html: "", contentType, isHtml };
+    }
     // Stream-limited: an endless/huge response is cut off at MAX_HTML_BYTES
     // instead of being buffered whole.
     const bytes = await readStreamLimited(res.body as any, MAX_HTML_BYTES);
-    const html = (bytes ?? Buffer.alloc(0)).toString("utf8");
-    return { finalUrl: res.url || url, html, contentType: res.headers.get("content-type") ?? "" };
+    const html = decodeHtml(bytes ?? Buffer.alloc(0), contentType);
+    return { finalUrl: res.url || url, html, contentType, isHtml };
   });
 }
+
+const MAX_JSON_BYTES = 2 * 1024 * 1024;
 
 export async function fetchJson(url: string): Promise<any> {
   return schedule(url, async () => {
@@ -173,7 +209,10 @@ export async function fetchJson(url: string): Promise<any> {
       signal: AbortSignal.timeout(15_000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return res.json();
+    // The only fetch path that buffered unbounded — cap it like the others.
+    const bytes = await readStreamLimited(res.body as any, MAX_JSON_BYTES);
+    if (bytes === null) throw new Error("json response too large");
+    return JSON.parse(bytes.toString("utf8"));
   });
 }
 

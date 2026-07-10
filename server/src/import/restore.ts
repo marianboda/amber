@@ -36,6 +36,7 @@ const BOOKMARK_COLUMNS = [
   "enrich_status",
   "fetch_status",
   "content_text",
+  "content_html",
   "archive_ref",
   "media_ref",
   "media_status",
