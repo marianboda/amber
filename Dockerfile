@@ -23,9 +23,10 @@ ENV NODE_ENV=production
 ENV AMBER_DATA_DIR=/data
 EXPOSE 3000
 
-# Unprivileged runtime user — the /data mount must be writable by uid 1000
-# (see DEPLOY.md: chown the host storage directory).
-USER node
+# Unprivileged runtime user with the uid Dokku's storage:ensure-directory
+# chowns mounts to (32767, "herokuish") — no root access needed on the host.
+RUN useradd --uid 32767 --user-group --create-home amber
+USER amber
 
 HEALTHCHECK --interval=60s --timeout=5s --start-period=15s \
   CMD ["node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

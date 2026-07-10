@@ -4,9 +4,9 @@ One-time setup on the server:
 
 ```sh
 dokku apps:create amber
+# ensure-directory chowns to uid 32767 (herokuish) — the Dockerfile's runtime
+# user matches, so no root chown is needed on the host.
 dokku storage:ensure-directory amber
-# The container runs as the unprivileged `node` user (uid 1000) — give it the mount:
-chown -R 1000:1000 /var/lib/dokku/data/storage/amber
 dokku storage:mount amber /var/lib/dokku/data/storage/amber:/data
 dokku config:set amber AMBER_TOKEN=<generate a long random token>
 # Behind Dokku's nginx the client IP arrives in X-Forwarded-For; without this
