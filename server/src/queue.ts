@@ -34,10 +34,21 @@ async function runWithTimeout(
 // queue is only the executor (design §2). Polls for pending rows, claims by
 // flipping status to running. On boot, running rows are reset to pending so
 // nothing is lost across restarts; handlers are idempotent.
+export interface FailedJob {
+  id: string;
+  type: string;
+  payload: string;
+  bookmark_id: string | null;
+}
+
 export function startWorker(
   db: Database.Database,
   handlers: Record<string, JobHandler>,
-  { concurrency = 2, pollMs = 1000 } = {}
+  {
+    concurrency = 2,
+    pollMs = 1000,
+    onPermanentFailure = undefined as ((job: FailedJob) => void) | undefined,
+  } = {}
 ): () => void {
   const executor = new PQueue({ concurrency });
 
@@ -49,7 +60,7 @@ export function startWorker(
   const claim = db.prepare(
     `UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
      WHERE id = (SELECT id FROM jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1)
-     RETURNING id, type, payload, attempts`
+     RETURNING id, type, payload, attempts, bookmark_id`
   );
   const finish = db.prepare("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?");
   const requeue = db.prepare("UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ?");
@@ -66,7 +77,7 @@ export function startWorker(
     if (stale > 0) console.warn(`queue: reclaimed ${stale} stale running job(s)`);
     while (executor.size + executor.pending < concurrency * 2) {
       const job = claim.get(now()) as
-        | { id: string; type: string; payload: string; attempts: number }
+        | { id: string; type: string; payload: string; attempts: number; bookmark_id: string | null }
         | undefined;
       if (!job) break;
       executor.add(async () => {
@@ -86,6 +97,14 @@ export function startWorker(
           } else {
             console.error(`job ${job.id} (${job.type}) failed permanently: ${message}`);
             finish.run("failed", message, now(), job.id);
+            // Lets the app stamp dependent state terminal (e.g. a bookmark whose
+            // enrichment kept timing out stays 'pending' otherwise and would be
+            // rescued — and billed for — by the maintenance sweep forever).
+            try {
+              onPermanentFailure?.(job);
+            } catch (hookErr) {
+              console.error(`onPermanentFailure hook failed for job ${job.id}:`, hookErr);
+            }
           }
         }
       });

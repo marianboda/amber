@@ -41,17 +41,20 @@ export function applyTopics(db: Database.Database, bookmarkId: string, names: st
 }
 
 // Idempotent: safe to re-run after a crash mid-way — every step overwrites.
+// mode 'metadata' skips the LLM step (fetch/extract/archive still run), used
+// by cheap bulk imports; the LLM pass comes later via /bookmarks/enrich-missing.
 export async function enrichBookmark(
   db: Database.Database,
   config: Config,
   bookmarkId: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  mode?: "metadata"
 ): Promise<void> {
   const bookmark = db.prepare("SELECT * FROM bookmarks WHERE id = ?").get(bookmarkId) as any;
   if (!bookmark) return; // deleted since enqueue — nothing to do
 
   try {
-    await run(db, config, bookmark, signal);
+    await run(db, config, bookmark, signal, mode === "metadata");
   } catch (err) {
     // If the job was aborted (timeout), leave status pending so a clean re-run
     // can redo it — don't stamp 'failed' on a cancellation.
@@ -72,10 +75,12 @@ async function run(
   db: Database.Database,
   config: Config,
   bookmark: any,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  skipLLM = false
 ): Promise<void> {
   const bookmarkId: string = bookmark.id;
   const topicNames = vocabulary(db);
+  const metadataOnly = skipLLM || config.llm.provider === "none";
   let enrichment: Enrichment | null = null;
 
   if (isYouTube(bookmark.url)) {
@@ -89,7 +94,7 @@ async function run(
     } else {
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
     }
-    if (config.llm.provider === "none") {
+    if (metadataOnly) {
       db.prepare(
         "UPDATE bookmarks SET content_type = 'video', enrich_status = 'done' WHERE id = ?"
       ).run(bookmarkId);
@@ -192,7 +197,7 @@ async function run(
       db.prepare("UPDATE bookmarks SET fetch_status = 'dead' WHERE id = ?").run(bookmarkId);
     }
 
-    if (config.llm.provider === "none") {
+    if (metadataOnly) {
       db.prepare("UPDATE bookmarks SET enrich_status = 'done' WHERE id = ?").run(bookmarkId);
       await cacheAssets(db, config.dataDir, bookmarkId).catch(() => {});
       return;

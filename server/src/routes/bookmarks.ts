@@ -7,7 +7,12 @@ import { canonicalize, domainOf } from "../canonical.js";
 import { enqueueJob } from "../jobs.js";
 import { readTextLimited } from "../http-util.js";
 import type { Config } from "../config.js";
-import { ensureUnsortedTopic, topicsForBookmark, setBookmarkTopics } from "./topics.js";
+import {
+  ensureUnsortedTopic,
+  topicsForBookmark,
+  topicsForBookmarks,
+  setBookmarkTopics,
+} from "./topics.js";
 
 const SAVED_FROM = new Set(["extension", "share_sheet", "context_menu", "import", "api"]);
 
@@ -147,11 +152,20 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       params.push(topic);
     }
 
-    const sql = `SELECT b.* FROM bookmarks b
+    // Everything except content_text, which can be hundreds of KB per row and
+    // is only needed by the detail view (GET /:id returns the full row).
+    const cardColumns =
+      `b.id, b.url, b.canonical_url, b.title, b.domain, b.favicon_url, b.og_image_url,
+       b.saved_at, b.content_type, b.gist, b.summary, b.note, b.is_read, b.saved_from,
+       b.device, b.referrer, b.source_detail, b.topic_hint, b.enrich_status,
+       b.fetch_status, b.archive_ref, b.media_ref, b.media_status, b.title_locked,
+       b.import_batch`;
+    const sql = `SELECT ${cardColumns} FROM bookmarks b
                  ${where.length ? "WHERE " + where.join(" AND ") : ""}
                  ORDER BY b.saved_at DESC, b.id DESC LIMIT ?`;
     const rows = db.prepare(sql).all(...params, max) as any[];
-    for (const row of rows) row.topics = topicsForBookmark(db, row.id);
+    const topicMap = topicsForBookmarks(db, rows.map((r) => r.id));
+    for (const row of rows) row.topics = topicMap.get(row.id) ?? [];
     const last = rows[rows.length - 1];
     return c.json({
       bookmarks: rows,
@@ -276,6 +290,36 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     // No script execution even if something slipped through the scrubs.
     c.header("Content-Security-Policy", "sandbox; script-src 'none'");
     return c.body(fs.readFileSync(file));
+  });
+
+  // Enqueue LLM enrichment for rows that completed metadata-only (imported
+  // with enrich=metadata, or enriched while no LLM key was configured).
+  // Batched by limit so a 20k backlog can be worked in controlled chunks.
+  app.post("/enrich-missing", async (c) => {
+    const body = await c.req.json().catch(() => ({}));
+    const requested = Math.trunc(Number(body?.limit));
+    const limit = Math.min(requested >= 1 ? requested : 500, 5000);
+    const rows = db
+      .prepare(
+        `SELECT id FROM bookmarks WHERE enrich_status = 'done' AND gist IS NULL
+         ORDER BY saved_at DESC LIMIT ?`
+      )
+      .all(limit) as { id: string }[];
+    const enqueue = db.transaction(() => {
+      for (const { id } of rows) {
+        db.prepare("UPDATE bookmarks SET enrich_status = 'pending' WHERE id = ?").run(id);
+        enqueueJob(db, "enrich", { bookmark_id: id });
+      }
+    });
+    enqueue();
+    const remaining = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM bookmarks WHERE enrich_status = 'done' AND gist IS NULL"
+        )
+        .get() as { n: number }
+    ).n;
+    return c.json({ enqueued: rows.length, remaining });
   });
 
   // Re-enqueue every failed enrichment in one shot.

@@ -21,6 +21,28 @@ export function topicsForBookmark(db: Database.Database, bookmarkId: string) {
     .all(bookmarkId);
 }
 
+// Batch variant for list/export paths — one query per 500 ids instead of one
+// per bookmark. Every requested id gets an entry (empty array when untagged).
+export function topicsForBookmarks(
+  db: Database.Database,
+  ids: string[]
+): Map<string, { id: string; name: string; color: string | null; by_ai: number }[]> {
+  const map = new Map(ids.map((id) => [id, [] as any[]]));
+  const CHUNK = 500;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const rows = db
+      .prepare(
+        `SELECT bt.bookmark_id, t.id, t.name, t.color, bt.by_ai FROM bookmark_topics bt
+         JOIN topics t ON t.id = bt.topic_id
+         WHERE bt.bookmark_id IN (${chunk.map(() => "?").join(",")}) ORDER BY t.name`
+      )
+      .all(...chunk) as any[];
+    for (const { bookmark_id, ...topic } of rows) map.get(bookmark_id)?.push(topic);
+  }
+  return map;
+}
+
 // Replaces a bookmark's topics with the given topic names (user-assigned, by_ai=0).
 // Returns names that don't exist in the vocabulary; nothing is written in that case.
 export function setBookmarkTopics(

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { ZipArchive } from "archiver";
-import { topicsForBookmark } from "./topics.js";
+import { topicsForBookmarks } from "./topics.js";
 
 export function exportRoutes(db: Database.Database, dataDir: string): Hono {
   const app = new Hono();
@@ -12,7 +12,8 @@ export function exportRoutes(db: Database.Database, dataDir: string): Hono {
   app.get("/", (c) => {
     const format = c.req.query("format") ?? "json";
     const bookmarks = db.prepare("SELECT * FROM bookmarks ORDER BY saved_at DESC").all() as any[];
-    for (const b of bookmarks) b.topics = topicsForBookmark(db, b.id);
+    const topicMap = topicsForBookmarks(db, bookmarks.map((b) => b.id));
+    for (const b of bookmarks) b.topics = topicMap.get(b.id) ?? [];
 
     if (format === "zip") {
       // Full backup: metadata JSON + archived pages + cached assets, streamed.

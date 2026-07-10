@@ -20,6 +20,7 @@ export function importRoutes(db: Database.Database): Hono {
 
     let text: string;
     let filename = "import";
+    let enrich = c.req.query("enrich") === "metadata" ? "metadata" : "full";
     const contentType = c.req.header("content-type") ?? "";
     if (contentType.includes("multipart/form-data")) {
       const form = await new Response(new Uint8Array(buffered), {
@@ -28,6 +29,7 @@ export function importRoutes(db: Database.Database): Hono {
       const file = form.get("file");
       if (!(file instanceof File)) return c.json({ error: "multipart field 'file' required" }, 400);
       filename = file.name || filename;
+      if (form.get("enrich") === "metadata") enrich = "metadata";
       text = await file.text();
     } else {
       text = buffered.toString("utf8");
@@ -38,17 +40,27 @@ export function importRoutes(db: Database.Database): Hono {
     const { items } = dedupeItems(parsed);
     if (!items.length) return c.json({ error: "no valid URLs found" }, 400);
 
-    const jobId = enqueueJob(db, "import", { filename, items });
-    return c.json({ job_id: jobId, count: items.length }, 202);
+    // enrich=metadata: fetch/extract/archive per item but skip the LLM call —
+    // lets a big first import run cheap, with LLM enrichment batched later via
+    // POST /bookmarks/enrich-missing.
+    const jobId = enqueueJob(db, "import", { filename, items, enrich });
+    return c.json({ job_id: jobId, count: items.length, enrich }, 202);
   });
 
   // Recent import jobs — lets the UI resume progress after a page reload.
+  // Progress lives in its own column; payload.progress is the pre-005 fallback.
   app.get("/", (c) => {
     const jobs = db
       .prepare(
-        "SELECT id, status, payload, created_at FROM jobs WHERE type = 'import' ORDER BY created_at DESC LIMIT 10"
+        "SELECT id, status, payload, progress, created_at FROM jobs WHERE type = 'import' ORDER BY created_at DESC LIMIT 10"
       )
-      .all() as { id: string; status: string; payload: string; created_at: number }[];
+      .all() as {
+      id: string;
+      status: string;
+      payload: string;
+      progress: string | null;
+      created_at: number;
+    }[];
     return c.json({
       imports: jobs.map((j) => {
         const payload = JSON.parse(j.payload);
@@ -56,7 +68,7 @@ export function importRoutes(db: Database.Database): Hono {
           job_id: j.id,
           status: j.status,
           filename: payload.filename,
-          progress: payload.progress ?? null,
+          progress: j.progress ? JSON.parse(j.progress) : payload.progress ?? null,
           created_at: j.created_at,
         };
       }),
@@ -65,9 +77,17 @@ export function importRoutes(db: Database.Database): Hono {
 
   app.get("/:job_id", (c) => {
     const job = db
-      .prepare("SELECT id, status, payload, error FROM jobs WHERE id = ? AND type = 'import'")
+      .prepare(
+        "SELECT id, status, payload, progress, error FROM jobs WHERE id = ? AND type = 'import'"
+      )
       .get(c.req.param("job_id")) as
-      | { id: string; status: string; payload: string; error: string | null }
+      | {
+          id: string;
+          status: string;
+          payload: string;
+          progress: string | null;
+          error: string | null;
+        }
       | undefined;
     if (!job) return c.json({ error: "not found" }, 404);
     const payload = JSON.parse(job.payload);
@@ -90,7 +110,7 @@ export function importRoutes(db: Database.Database): Hono {
       status: job.status,
       error: job.error,
       filename,
-      progress: payload.progress ?? null,
+      progress: job.progress ? JSON.parse(job.progress) : payload.progress ?? null,
       enrichment: enrich,
     });
   });

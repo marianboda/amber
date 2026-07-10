@@ -15,46 +15,56 @@ import { exportRoutes } from "./routes/export.js";
 import { startWorker } from "./queue.js";
 import { enrichBookmark } from "./pipeline/enrich.js";
 import { runImport } from "./import/run.js";
+import { runMaintenance } from "./maintenance.js";
+import { opsRoutes } from "./routes/ops.js";
 
 const config = loadConfig();
 const db = openDb(config.dbPath);
 
-startWorker(db, {
-  enrich: (payload, _jobId, signal) => enrichBookmark(db, config, payload.bookmark_id, signal),
-  import: (payload, jobId) => runImport(db, payload, jobId),
-});
-
-// Housekeeping: purge finished jobs, and rescue bookmarks whose deferred
-// enrichment never happened (archive_coming save whose snapshot never arrived).
-function maintenance() {
-  const now = Math.floor(Date.now() / 1000);
-  db.prepare("DELETE FROM jobs WHERE status = 'done' AND updated_at < ?").run(now - 7 * 86400);
-  db.prepare("DELETE FROM jobs WHERE status = 'failed' AND updated_at < ?").run(now - 30 * 86400);
-  const orphans = db
-    .prepare(
-      `SELECT b.id FROM bookmarks b
-       WHERE b.enrich_status = 'pending' AND b.saved_at < ?
-         AND NOT EXISTS (
-           SELECT 1 FROM jobs j
-           WHERE j.type = 'enrich' AND j.status IN ('pending', 'running')
-             AND j.payload LIKE '%' || b.id || '%'
-         )`
-    )
-    .all(now - 120) as { id: string }[];
-  for (const { id } of orphans) {
-    db.prepare(
-      `INSERT INTO jobs (id, type, payload, status, attempts, created_at, updated_at)
-       VALUES (?, 'enrich', ?, 'pending', 0, ?, ?)`
-    ).run(crypto.randomUUID(), JSON.stringify({ bookmark_id: id }), now, now);
+startWorker(
+  db,
+  {
+    enrich: (payload, _jobId, signal) =>
+      enrichBookmark(db, config, payload.bookmark_id, signal, payload.mode),
+    import: (payload, jobId, signal) => runImport(db, payload, jobId, signal),
+  },
+  {
+    // A permanently-failed enrichment must surface as a failed bookmark:
+    // leaving it 'pending' would strand the UI shimmer and make the
+    // maintenance sweep re-enqueue (and re-bill) it forever.
+    onPermanentFailure: (job) => {
+      if (job.type === "enrich" && job.bookmark_id) {
+        db.prepare(
+          "UPDATE bookmarks SET enrich_status = 'failed' WHERE id = ? AND enrich_status = 'pending'"
+        ).run(job.bookmark_id);
+      }
+    },
   }
-  if (orphans.length) console.log(`maintenance: rescued ${orphans.length} orphaned enrichment(s)`);
+);
+
+function maintenance() {
+  const rescued = runMaintenance(db);
+  if (rescued) console.log(`maintenance: rescued ${rescued} orphaned enrichment(s)`);
 }
 maintenance();
 setInterval(maintenance, 60_000);
 
 const app = new Hono();
 
-app.get("/health", (c) => c.json({ ok: true }));
+app.onError((err, c) => {
+  console.error(`unhandled error on ${c.req.method} ${c.req.path}:`, err);
+  return c.json({ error: "internal error" }, 500);
+});
+
+app.get("/health", (c) => {
+  try {
+    db.prepare("SELECT 1").get();
+    return c.json({ ok: true });
+  } catch (err) {
+    console.error("health check failed:", err);
+    return c.json({ ok: false }, 500);
+  }
+});
 
 const api = new Hono();
 // CORS so the bookmarklet can POST from any page origin. Auth is still the
@@ -67,6 +77,7 @@ api.route("/bookmarks", bookmarkRoutes(db, config));
 api.route("/topics", topicRoutes(db));
 api.route("/import", importRoutes(db));
 api.route("/export", exportRoutes(db, config.dataDir));
+api.route("/", opsRoutes(db, config.dataDir));
 
 app.route("/api", api);
 
