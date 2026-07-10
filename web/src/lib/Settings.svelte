@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, getToken, setToken } from "./api";
-  import { store, reload, reloadTopics } from "./store.svelte";
+  import { store, reload, reloadTopics, guarded, showToast } from "./store.svelte";
 
   let token = $state(getToken());
   let retryMsg = $state("");
@@ -23,7 +23,8 @@
   });
 
   async function retryFailed() {
-    const res = await api.retryFailed();
+    const res = await guarded(() => api.retryFailed());
+    if (!res) return;
     retryMsg = res.retried ? `re-queued ${res.retried}` : "nothing failed";
     if (res.retried) reload();
   }
@@ -57,7 +58,10 @@
 
   let importJob = $state("");
   let importMsg = $state("");
-  let importProgress = $state<{ total: number; imported: number; duplicates: number; invalid: number } | null>(null);
+  let importMetadataOnly = $state(false);
+  // Import progress has total/imported/…, restore progress has
+  // bookmarks_restored/files_restored/… — render whichever arrives.
+  let importProgress = $state<Record<string, number> | null>(null);
   let enrichCounts = $state<Record<string, number> | null>(null);
 
   async function onFile(e: Event) {
@@ -66,9 +70,11 @@
     if (!file) return;
     importMsg = "uploading…";
     try {
-      const res = await api.importFile(file);
+      const res = await api.importFile(file, importMetadataOnly);
       importJob = res.job_id;
-      importMsg = `${res.count} bookmarks queued`;
+      importMsg = (res as any).restore
+        ? "restoring backup…"
+        : `${res.count} bookmarks queued${importMetadataOnly ? " (metadata only)" : ""}`;
       pollImport();
     } catch (err: any) {
       importMsg = `error: ${err.message}`;
@@ -91,7 +97,9 @@
         const enrichDone =
           s.status === "done" && (s.enrichment.pending ?? 0) === 0;
         if (enrichDone) {
-          importMsg = "import + enrichment complete ✓";
+          importMsg = importProgress?.bookmarks_restored !== undefined
+            ? "restore complete ✓"
+            : "import + enrichment complete ✓";
           importJob = "";
           reload();
           break;
@@ -112,7 +120,11 @@
   async function download(format: "json" | "html" | "zip") {
     const res = await fetch(api.exportUrl(format), {
       headers: { Authorization: `Bearer ${getToken()}` },
-    });
+    }).catch(() => null);
+    if (!res?.ok) {
+      showToast("Export failed — is the server reachable?");
+      return;
+    }
     const blob = await res.blob();
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
@@ -156,18 +168,32 @@
 
   <section>
     <h2>Import</h2>
-    <p class="muted">Netscape bookmark HTML (Chrome/Firefox/Safari export) or a plain URL / CSV list.</p>
+    <p class="muted">
+      Netscape bookmark HTML (Chrome/Firefox/Safari export), a plain URL / CSV list, or an Amber
+      export (.json / backup .zip) to restore.
+    </p>
     <div class="row">
-      <input type="file" accept=".html,.htm,.csv,.txt" onchange={onFile} disabled={!!importJob} />
+      <input type="file" accept=".html,.htm,.csv,.txt,.json,.zip" onchange={onFile} disabled={!!importJob} />
     </div>
+    <label class="muted checkbox">
+      <input type="checkbox" bind:checked={importMetadataOnly} />
+      metadata only — skip AI enrichment (run it later in batches, cheaper for big imports)
+    </label>
     {#if importMsg}<p class="muted">{importMsg}</p>{/if}
     {#if importProgress}
-      <progress max={importProgress.total} value={importProgress.imported + importProgress.duplicates + importProgress.invalid}></progress>
-      <p class="muted">
-        {importProgress.imported} imported · {importProgress.duplicates} duplicates ·
-        {importProgress.invalid} invalid
-        {#if enrichCounts}· enrichment: {enrichCounts.done ?? 0} done, {enrichCounts.pending ?? 0} pending{/if}
-      </p>
+      {#if importProgress.total !== undefined}
+        <progress max={importProgress.total} value={(importProgress.imported ?? 0) + (importProgress.duplicates ?? 0) + (importProgress.invalid ?? 0)}></progress>
+        <p class="muted">
+          {importProgress.imported ?? 0} imported · {importProgress.duplicates ?? 0} duplicates ·
+          {importProgress.invalid ?? 0} invalid
+          {#if enrichCounts}· enrichment: {enrichCounts.done ?? 0} done, {enrichCounts.pending ?? 0} pending{/if}
+        </p>
+      {:else}
+        <p class="muted">
+          restored {importProgress.bookmarks_restored ?? 0} · skipped {importProgress.bookmarks_skipped ?? 0}
+          · files {importProgress.files_restored ?? 0}
+        </p>
+      {/if}
     {/if}
   </section>
 
@@ -269,6 +295,12 @@
     color: var(--muted);
     font-size: 0.82rem;
     margin: 0;
+  }
+  .checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    cursor: pointer;
   }
   code {
     font-size: 0.75rem;

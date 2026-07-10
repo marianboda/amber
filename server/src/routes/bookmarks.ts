@@ -102,18 +102,41 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     return c.json({ id }, 201);
   });
 
+  // Batched enrichment status for the UI's pending-card poll — one request
+  // for a whole screenful instead of 20 sequential GETs every 2s.
+  app.get("/status", (c) => {
+    const ids = (c.req.query("ids") ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .slice(0, 100);
+    if (!ids.length) return c.json({ statuses: [] });
+    const rows = db
+      .prepare(
+        `SELECT id, enrich_status, fetch_status, gist FROM bookmarks
+         WHERE id IN (${ids.map(() => "?").join(",")})`
+      )
+      .all(...ids);
+    return c.json({ statuses: rows });
+  });
+
   app.get("/", (c) => {
-    const { topic, type, q, read, before, limit } = c.req.query();
+    const { topic, type, q, read, before, after, domain, sort, limit } = c.req.query();
     // Clamp to [1, 200]; invalid/≤0 falls back to 50 (a raw negative would
     // become SQLite LIMIT -1 = unbounded and could scan the whole library).
     const requested = Math.trunc(Number(limit));
     const max = Math.min(requested >= 1 ? requested : 50, 200);
+    const oldest = sort === "oldest";
 
     const where: string[] = [];
     const params: unknown[] = [];
     if (type) {
       where.push("b.content_type = ?");
       params.push(type);
+    }
+    if (domain) {
+      where.push("b.domain = ?");
+      params.push(domain);
     }
     if (q) {
       const match = ftsQuery(q);
@@ -130,18 +153,23 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       where.push("b.is_read = ?");
       params.push(Number(read));
     }
-    if (before) {
-      // Stable cursor "savedAt.id": rows with an identical saved_at (common
-      // after an import that shares one ADD_DATE) are no longer skipped.
-      const dot = String(before).lastIndexOf(".");
-      const beforeSaved = Number(dot > 0 ? before.slice(0, dot) : before);
-      const beforeId = dot > 0 ? before.slice(dot + 1) : "";
-      if (beforeId) {
-        where.push("(b.saved_at < ? OR (b.saved_at = ? AND b.id < ?))");
-        params.push(beforeSaved, beforeSaved, beforeId);
+    // Stable cursor "savedAt.id": rows with an identical saved_at (common
+    // after an import that shares one ADD_DATE) are no longer skipped.
+    // `before` pages newest-first, `after` pages oldest-first (sort=oldest).
+    const cursor = oldest ? after : before;
+    if (cursor) {
+      const dot = String(cursor).lastIndexOf(".");
+      const cursorSaved = Number(dot > 0 ? cursor.slice(0, dot) : cursor);
+      const cursorId = dot > 0 ? cursor.slice(dot + 1) : "";
+      const [cmp] = oldest ? [">"] : ["<"];
+      if (cursorId) {
+        where.push(
+          `(b.saved_at ${cmp} ? OR (b.saved_at = ? AND b.id ${cmp} ?))`
+        );
+        params.push(cursorSaved, cursorSaved, cursorId);
       } else {
-        where.push("b.saved_at < ?");
-        params.push(beforeSaved);
+        where.push(`b.saved_at ${cmp} ?`);
+        params.push(cursorSaved);
       }
     }
     if (topic) {
@@ -160,16 +188,19 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
        b.device, b.referrer, b.source_detail, b.topic_hint, b.enrich_status,
        b.fetch_status, b.archive_ref, b.media_ref, b.media_status, b.title_locked,
        b.import_batch`;
+    const order = oldest ? "ASC" : "DESC";
     const sql = `SELECT ${cardColumns} FROM bookmarks b
                  ${where.length ? "WHERE " + where.join(" AND ") : ""}
-                 ORDER BY b.saved_at DESC, b.id DESC LIMIT ?`;
+                 ORDER BY b.saved_at ${order}, b.id ${order} LIMIT ?`;
     const rows = db.prepare(sql).all(...params, max) as any[];
     const topicMap = topicsForBookmarks(db, rows.map((r) => r.id));
     for (const row of rows) row.topics = topicMap.get(row.id) ?? [];
     const last = rows[rows.length - 1];
+    const next = rows.length === max ? `${last.saved_at}.${last.id}` : null;
     return c.json({
       bookmarks: rows,
-      next_before: rows.length === max ? `${last.saved_at}.${last.id}` : null,
+      next_before: oldest ? null : next,
+      next_after: oldest ? next : null,
     });
   });
 

@@ -21,33 +21,75 @@
     store.read = store.read === "" ? "0" : store.read === "0" ? "1" : "";
     reload();
   }
+  function toggleSort() {
+    store.sort = store.sort === "oldest" ? "" : "oldest";
+    reload();
+  }
+  function clearDomain() {
+    store.domain = "";
+    reload();
+  }
 </script>
 
 <header>
   <div class="row">
     <span class="logo">🟠 Amber</span>
-    <input type="search" placeholder="Search title, gist, notes…" value={store.q} oninput={onSearch} />
+    <input
+      id="lib-search"
+      type="search"
+      placeholder="Search title, gist, notes… ( / )"
+      value={store.q}
+      oninput={onSearch}
+      aria-label="Search library"
+    />
     <button
       class="icon-btn"
       title="Toggle grid/list"
+      aria-label="Toggle grid or list view"
       onclick={() => (store.view = store.view === "grid" ? "list" : "grid")}
     >
       {store.view === "grid" ? "☰" : "▦"}
     </button>
-    <button class="icon-btn" title="Settings" onclick={() => (store.page = "settings")}>⚙︎</button>
+    <button class="icon-btn" title="Settings" aria-label="Settings" onclick={() => (store.page = "settings")}>⚙︎</button>
   </div>
   <div class="row filters">
     {#each store.topics.filter((t) => (t.count ?? 0) > 0) as t (t.id)}
-      <button class="chip" class:active={store.topic === t.name} onclick={() => setTopic(t.name)}>
+      <button
+        class="chip"
+        class:active={store.topic === t.name}
+        aria-pressed={store.topic === t.name}
+        onclick={() => setTopic(t.name)}
+      >
         {t.name} <span class="count">{t.count}</span>
       </button>
     {/each}
+    {#if store.domain}
+      <button class="chip active" aria-pressed="true" onclick={clearDomain} title="Clear domain filter">
+        {store.domain} ✕
+      </button>
+    {/if}
     <span class="spacer"></span>
-    <button class="chip" class:active={store.read !== ""} onclick={cycleRead} title="Filter by read flag">
+    <button class="chip" class:active={store.sort === "oldest"} aria-pressed={store.sort === "oldest"} onclick={toggleSort} title="Sort order">
+      {store.sort === "oldest" ? "oldest ↑" : "newest ↓"}
+    </button>
+    <button
+      class="chip"
+      class:active={store.read !== ""}
+      aria-pressed={store.read !== ""}
+      onclick={cycleRead}
+      title="Filter by read flag"
+    >
       {store.read === "" ? "read: all" : store.read === "0" ? "unread" : "read ✓"}
     </button>
     {#each CONTENT_TYPES as t}
-      <button class="chip type" class:active={store.type === t} onclick={() => setType(t)} title={t}>
+      <button
+        class="chip type"
+        class:active={store.type === t}
+        aria-pressed={store.type === t}
+        onclick={() => setType(t)}
+        title={t}
+        aria-label="Filter type: {t}"
+      >
         {TYPE_ICONS[t]}
       </button>
     {/each}

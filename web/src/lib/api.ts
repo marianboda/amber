@@ -64,6 +64,11 @@ export const api = {
     request(`/bookmarks?${new URLSearchParams(params)}`) as Promise<{
       bookmarks: Bookmark[];
       next_before: string | null;
+      next_after: string | null;
+    }>,
+  statusBatch: (ids: string[]) =>
+    request(`/bookmarks/status?ids=${ids.join(",")}`) as Promise<{
+      statuses: { id: string; enrich_status: string; fetch_status: string; gist: string | null }[];
     }>,
   get: (id: string) => request(`/bookmarks/${id}`) as Promise<Bookmark>,
   status: (id: string) =>
@@ -95,9 +100,10 @@ export const api = {
         progress: { total: number; imported: number; duplicates: number; invalid: number } | null;
       }[];
     }>,
-  importFile: (file: File) => {
+  importFile: (file: File, metadataOnly = false) => {
     const form = new FormData();
     form.append("file", file);
+    if (metadataOnly) form.append("enrich", "metadata");
     return request("/import", { method: "POST", body: form }) as Promise<{
       job_id: string;
       count: number;

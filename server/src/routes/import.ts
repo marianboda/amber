@@ -113,7 +113,7 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
   app.get("/", (c) => {
     const jobs = db
       .prepare(
-        "SELECT id, status, payload, progress, created_at FROM jobs WHERE type = 'import' ORDER BY created_at DESC LIMIT 10"
+        "SELECT id, status, payload, progress, created_at FROM jobs WHERE type IN ('import','restore') ORDER BY created_at DESC LIMIT 10"
       )
       .all() as {
       id: string;
@@ -139,7 +139,7 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
   app.get("/:job_id", (c) => {
     const job = db
       .prepare(
-        "SELECT id, status, payload, progress, error FROM jobs WHERE id = ? AND type = 'import'"
+        "SELECT id, status, payload, progress, error FROM jobs WHERE id = ? AND type IN ('import','restore')"
       )
       .get(c.req.param("job_id")) as
       | {

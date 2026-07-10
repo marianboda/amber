@@ -1,6 +1,7 @@
 <script lang="ts">
+  import { tick } from "svelte";
   import { api, type Bookmark } from "./api";
-  import { store, updateBookmark, removeBookmark } from "./store.svelte";
+  import { store, guarded, showToast, updateBookmark, removeBookmark } from "./store.svelte";
   import { TYPE_ICONS, provenance } from "./format";
   import Reader from "./Reader.svelte";
 
@@ -8,44 +9,74 @@
 
   let bookmark = $state<Bookmark | null>(null);
   let note = $state("");
-  let saving = $state(false);
+  let saving = $state<"" | "saving" | "saved">("");
+  let panel = $state<HTMLElement | null>(null);
+  let opener: HTMLElement | null = null;
 
   $effect(() => {
     const requested = store.detailId;
     if (requested) {
-      api.get(requested).then((b) => {
+      opener = document.activeElement as HTMLElement;
+      guarded(() => api.get(requested)).then((b) => {
         // Ignore a slow response for a bookmark the user already navigated away
         // from — otherwise clicking A then B could leave A's data on screen.
-        if (store.detailId !== requested) return;
+        if (!b || store.detailId !== requested) return;
         bookmark = b;
         note = b.note ?? "";
+        saving = "";
+        tick().then(() => panel?.querySelector<HTMLElement>(".close")?.focus());
       });
     } else {
       bookmark = null;
+      readerOpen = false;
+      // Hand focus back to the card that opened the panel.
+      opener?.focus?.();
+      opener = null;
     }
   });
 
   function close() {
+    flushNote();
     store.detailId = null;
   }
-  async function saveNote() {
-    if (!bookmark) return;
-    saving = true;
-    const updated = await api.patch(bookmark.id, { note });
-    bookmark = updated;
-    updateBookmark(updated);
-    saving = false;
+
+  // Notes autosave (debounced + on blur/close) — a typed note must survive any
+  // way of leaving the panel; zero-question ethos, no confirm dialogs.
+  let noteTimer: ReturnType<typeof setTimeout>;
+  function onNoteInput() {
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(flushNote, 800);
   }
+  async function flushNote() {
+    clearTimeout(noteTimer);
+    if (!bookmark || note === (bookmark.note ?? "")) return;
+    saving = "saving";
+    const id = bookmark.id;
+    const updated = await guarded(() => api.patch(id, { note }));
+    if (updated) {
+      if (bookmark?.id === id) bookmark = updated;
+      updateBookmark(updated);
+      saving = "saved";
+      setTimeout(() => (saving = ""), 1500);
+    } else {
+      saving = "";
+    }
+  }
+
   async function toggleRead() {
     if (!bookmark) return;
-    const updated = await api.patch(bookmark.id, { is_read: !bookmark.is_read });
-    bookmark = updated;
-    updateBookmark(updated);
+    const updated = await guarded(() => api.patch(bookmark!.id, { is_read: !bookmark!.is_read }));
+    if (updated) {
+      bookmark = updated;
+      note = updated.note ?? note;
+      updateBookmark(updated);
+    }
   }
   async function del() {
-    if (!bookmark || !confirm("Delete this bookmark?")) return;
-    await api.remove(bookmark.id);
-    removeBookmark(bookmark.id);
+    if (!bookmark || !confirm("Delete this bookmark? It stays in trash for 30 days.")) return;
+    const id = bookmark.id;
+    const ok = await guarded(() => api.remove(id));
+    if (ok) removeBookmark(id);
   }
   let archiveUrl = $state("");
 
@@ -55,20 +86,57 @@
     if (!bookmark) return;
     const res = await fetch(`/api/bookmarks/${bookmark.id}/archive`, {
       headers: { Authorization: `Bearer ${localStorage.getItem("amber_token") ?? ""}` },
-    });
-    if (!res.ok) return;
+    }).catch(() => null);
+    if (!res?.ok) {
+      showToast("Couldn't load the archived copy");
+      return;
+    }
     archiveUrl = URL.createObjectURL(await res.blob());
   }
   function closeArchive() {
     URL.revokeObjectURL(archiveUrl);
     archiveUrl = "";
   }
+
+  // Escape peels layers in order: archive overlay → reader → panel.
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key !== "Escape") {
+      if (e.key === "Tab" && bookmark && !readerOpen && !archiveUrl) trapFocus(e);
+      return;
+    }
+    if (archiveUrl) closeArchive();
+    else if (readerOpen) readerOpen = false;
+    else if (bookmark) close();
+  }
+
+  // Minimal focus trap: Tab cycles inside the dialog while it's open.
+  function trapFocus(e: KeyboardEvent) {
+    if (!panel) return;
+    const focusables = [
+      ...panel.querySelectorAll<HTMLElement>(
+        'button, a[href], input, textarea, [tabindex]:not([tabindex="-1"])'
+      ),
+    ].filter((el) => el.offsetParent !== null);
+    if (!focusables.length) return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    const active = document.activeElement as HTMLElement;
+    if (e.shiftKey && (active === first || !panel.contains(active))) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && (active === last || !panel.contains(active))) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 {#if bookmark}
   <div class="backdrop" onclick={close} role="presentation"></div>
-  <aside>
-    <button class="close" onclick={close}>✕</button>
+  <div class="panel" bind:this={panel} role="dialog" aria-modal="true" aria-label={bookmark.title ?? bookmark.url}>
+    <button class="close" onclick={close} aria-label="Close details">✕</button>
     <div class="meta">
       {#if bookmark.favicon_url}<img src={bookmark.favicon_url} alt="" />{/if}
       <span>{bookmark.domain}</span>
@@ -88,11 +156,19 @@
       </div>
     {/if}
 
-    <label class="note-label" for="note">Note</label>
-    <textarea id="note" bind:value={note} rows="4" placeholder="Your note…"></textarea>
-    {#if note !== (bookmark.note ?? "")}
-      <button class="save" onclick={saveNote} disabled={saving}>{saving ? "Saving…" : "Save note"}</button>
-    {/if}
+    <label class="note-label" for="note">
+      Note
+      {#if saving === "saving"}<span class="save-state">saving…</span>
+      {:else if saving === "saved"}<span class="save-state">saved ✓</span>{/if}
+    </label>
+    <textarea
+      id="note"
+      bind:value={note}
+      rows="4"
+      placeholder="Your note…"
+      oninput={onNoteInput}
+      onblur={flushNote}
+    ></textarea>
 
     <label class="read">
       <input type="checkbox" checked={!!bookmark.is_read} onchange={toggleRead} />
@@ -111,7 +187,7 @@
       {/if}
       <button class="btn danger" onclick={del}>Delete</button>
     </div>
-  </aside>
+  </div>
 {/if}
 
 {#if readerOpen && bookmark}
@@ -135,7 +211,7 @@
     background: rgb(0 0 0 / 0.35);
     z-index: 20;
   }
-  aside {
+  .panel {
     position: fixed;
     top: 0;
     right: 0;
@@ -204,6 +280,10 @@
     color: var(--muted);
     margin-top: 0.4rem;
   }
+  .save-state {
+    margin-left: 0.5rem;
+    font-style: italic;
+  }
   textarea {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -213,16 +293,6 @@
     font: inherit;
     font-size: 0.85rem;
     resize: vertical;
-  }
-  .save {
-    align-self: flex-start;
-    padding: 0.3rem 0.8rem;
-    border-radius: 6px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: white;
-    cursor: pointer;
-    font-size: 0.8rem;
   }
   .read {
     display: flex;
