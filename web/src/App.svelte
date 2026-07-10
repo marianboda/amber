@@ -9,8 +9,9 @@
     buildHash,
     bulkMarkRead,
     bulkDelete,
+    showToast,
   } from "./lib/store.svelte";
-  import { getToken } from "./lib/api";
+  import { api, getToken } from "./lib/api";
   import TopBar from "./lib/TopBar.svelte";
   import Card from "./lib/Card.svelte";
   import Detail from "./lib/Detail.svelte";
@@ -26,10 +27,35 @@
     if (!getToken()) {
       store.page = "settings";
     } else {
+      handleShareTarget();
       reload();
       reloadTopics();
     }
   });
+
+  // Android PWA share sheet lands on /share?url=…&text=…&title=… (manifest
+  // share_target). Some apps put the link in `text` — take the first URL found.
+  async function handleShareTarget() {
+    if (location.pathname !== "/share") return;
+    const params = new URLSearchParams(location.search);
+    const raw = params.get("url") || params.get("text") || "";
+    const url = raw.match(/https?:\/\/\S+/)?.[0];
+    history.replaceState(null, "", "/");
+    if (!url) {
+      showToast("Nothing to save — no link in the shared content");
+      return;
+    }
+    try {
+      const res = await api.save(url, { saved_from: "share_sheet" });
+      showToast(
+        res.duplicate && res.saved_at
+          ? `Already in Amber — first saved ${new Date(res.saved_at * 1000).toLocaleDateString()}`
+          : "Saved ✓"
+      );
+    } catch (e: any) {
+      showToast(`Save failed: ${e?.message ?? "unknown error"}`);
+    }
+  }
 
   // State → URL. Opening a detail pushes a history entry (so Back closes the
   // panel); everything else replaces, to keep history clean while filtering.

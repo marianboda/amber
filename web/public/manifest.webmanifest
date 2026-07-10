@@ -1,0 +1,18 @@
+{
+  "name": "Amber",
+  "short_name": "Amber",
+  "description": "Permanent bookmark library",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1c1b1a",
+  "theme_color": "#e6a83c",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "GET",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}

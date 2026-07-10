@@ -48,7 +48,12 @@
     if (!saveUrl.trim()) return;
     try {
       const res = await api.save(saveUrl.trim());
-      saveMsg = res.duplicate ? "already saved" : "saved ✓";
+      saveMsg =
+        res.duplicate && res.saved_at
+          ? `already saved — first on ${new Date(res.saved_at * 1000).toLocaleDateString()}`
+          : res.duplicate
+            ? "already saved"
+            : "saved ✓";
       saveUrl = "";
       reload();
     } catch (e: any) {

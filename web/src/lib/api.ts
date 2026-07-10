@@ -84,11 +84,11 @@ export const api = {
     request(`/bookmarks/${id}`, { method: "PATCH", body: JSON.stringify(body) }) as Promise<Bookmark>,
   remove: (id: string) => request(`/bookmarks/${id}`, { method: "DELETE" }),
   retry: (id: string) => request(`/bookmarks/${id}/retry`, { method: "POST" }),
-  save: (url: string) =>
+  save: (url: string, extra: { saved_from?: string; source_detail?: string; note?: string } = {}) =>
     request("/bookmarks", {
       method: "POST",
-      body: JSON.stringify({ url, saved_from: "api", source_detail: "web-ui" }),
-    }),
+      body: JSON.stringify({ url, saved_from: "api", source_detail: "web-ui", ...extra }),
+    }) as Promise<{ id: string; duplicate?: boolean; saved_at?: number }>,
   topics: () => request("/topics") as Promise<{ topics: Topic[] }>,
   exportUrl: (format: "json" | "html" | "zip") => `/api/export?format=${format}`,
   retryFailed: () =>

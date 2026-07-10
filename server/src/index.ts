@@ -88,6 +88,11 @@ const api = new Hono();
 // bearer token; CORS only lifts the browser's same-origin restriction.
 api.use("*", cors({ origin: "*", allowHeaders: ["Authorization", "Content-Type"] }));
 api.use("*", bearerAuth(config.authToken));
+// Notes/content must not linger in shared caches or on shared machines.
+api.use("*", async (c, next) => {
+  await next();
+  c.header("Cache-Control", "no-store");
+});
 
 api.get("/ping", (c) => c.json({ pong: true, device: config.deviceName }));
 api.route("/bookmarks", bookmarkRoutes(db, config));
@@ -103,7 +108,8 @@ app.route("/api", api);
 app.get("/assets/:kind/:file", (c) => {
   const kind = c.req.param("kind");
   const file = c.req.param("file");
-  if (!["thumbs", "favicons"].includes(kind) || !/^[\w.-]+$/.test(file)) {
+  // Leading dot rejected: "."/".." resolve to directories and 500.
+  if (!["thumbs", "favicons"].includes(kind) || !/^[A-Za-z0-9][\w.-]*$/.test(file)) {
     return c.json({ error: "bad path" }, 400);
   }
   const full = path.join(config.dataDir, "assets", kind, file);
