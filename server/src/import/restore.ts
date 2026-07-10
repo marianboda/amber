@@ -46,7 +46,30 @@ const BOOKMARK_COLUMNS = [
 
 // Only these zip entries are extracted, and only with sane one-level names —
 // a hostile zip must not be able to write outside dataDir (zip slip).
-const SAFE_ENTRY = /^(archives|assets\/(?:thumbs|favicons))\/[\w.-]+$/;
+const SAFE_ENTRY = /^(archives|assets\/(?:thumbs|favicons))\/[\w][\w.-]*$/;
+
+// Restored metadata is data too: refs are only honored when they point at the
+// shapes Amber itself writes, so a crafted export can't smuggle "../../"
+// paths into later archive serving/deletion.
+const SAFE_ARCHIVE_REF = /^archives\/[\w][\w.-]*$/;
+const SAFE_MEDIA_REF = /^media\/[\w][\w.-]*$/;
+const SAFE_ASSET_URL = /^\/assets\/(?:thumbs|favicons)\/[\w][\w.-]*$/;
+
+function safeRef(value: unknown, pattern: RegExp): string | null {
+  return typeof value === "string" && pattern.test(value) ? value : null;
+}
+
+function safeAssetUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  if (/^https?:\/\//.test(value) || SAFE_ASSET_URL.test(value)) return value;
+  return null;
+}
+
+// Zip-bomb limits: the 4GB cap on the *compressed* upload says nothing about
+// what it inflates to.
+const MAX_JSON_ENTRY = 1024 * 1024 * 1024; // 1GB metadata JSON
+const MAX_FILE_ENTRY = 512 * 1024 * 1024; // archives are capped at 300MB at write time
+const MAX_TOTAL_EXTRACTED = 20 * 1024 * 1024 * 1024; // 20GB across all entries
 
 export interface RestoreProgress {
   bookmarks_restored: number;
@@ -111,6 +134,7 @@ function extractZip(
     yauzl.open(zipPath, { lazyEntries: true }, (err, zip) => {
       if (err || !zip) return reject(err ?? new Error("unreadable zip"));
       let json: any = null;
+      let totalExtracted = 0;
       zip.on("error", reject);
       zip.on("end", () => resolve(json));
       zip.on("entry", (entry: yauzl.Entry) => {
@@ -122,10 +146,21 @@ function extractZip(
         const handleNext = () => zip.readEntry();
 
         if (name === "amber-export.json") {
+          if (entry.uncompressedSize > MAX_JSON_ENTRY) {
+            return reject(new Error("backup metadata JSON too large"));
+          }
           zip.openReadStream(entry, (streamErr, stream) => {
             if (streamErr || !stream) return reject(streamErr ?? new Error("bad zip entry"));
             const chunks: Buffer[] = [];
-            stream.on("data", (c: Buffer) => chunks.push(c));
+            let size = 0;
+            stream.on("data", (c: Buffer) => {
+              size += c.length;
+              if (size > MAX_JSON_ENTRY) {
+                stream.destroy();
+                return reject(new Error("backup metadata JSON too large"));
+              }
+              chunks.push(c);
+            });
             stream.on("error", reject);
             stream.on("end", () => {
               try {
@@ -142,6 +177,16 @@ function extractZip(
         if (!SAFE_ENTRY.test(name) || name.endsWith("/")) {
           return handleNext(); // directory rows and anything unexpected
         }
+        // Inflation caps: a tiny compressed zip must not OOM memory or fill
+        // the disk (yauzl verifies the declared sizes against the stream).
+        if (entry.uncompressedSize > MAX_FILE_ENTRY) {
+          progress.files_skipped++;
+          return handleNext();
+        }
+        totalExtracted += entry.uncompressedSize;
+        if (totalExtracted > MAX_TOTAL_EXTRACTED) {
+          return reject(new Error("backup inflates beyond the extraction cap"));
+        }
         const dest = path.join(dataDir, name);
         if (fs.existsSync(dest)) {
           progress.files_skipped++;
@@ -150,12 +195,19 @@ function extractZip(
         zip.openReadStream(entry, (streamErr, stream) => {
           if (streamErr || !stream) return reject(streamErr ?? new Error("bad zip entry"));
           fs.mkdirSync(path.dirname(dest), { recursive: true });
-          pipeline(stream as unknown as Readable, fs.createWriteStream(dest))
+          // Write to a temp name, rename when complete — a crash mid-stream
+          // must not leave a truncated file that later re-runs treat as done.
+          const tmp = `${dest}.restoretmp`;
+          pipeline(stream as unknown as Readable, fs.createWriteStream(tmp))
             .then(() => {
+              fs.renameSync(tmp, dest);
               progress.files_restored++;
               handleNext();
             })
-            .catch(reject);
+            .catch((pipeErr) => {
+              fs.rmSync(tmp, { force: true });
+              reject(pipeErr);
+            });
         });
       });
       zip.readEntry();
@@ -206,7 +258,17 @@ function restoreMetadata(db: Database.Database, data: any, progress: RestoreProg
         progress.bookmarks_skipped++;
         continue;
       }
-      insertBookmark.run(...BOOKMARK_COLUMNS.map((col) => b[col] ?? null));
+      const sanitized = {
+        ...b,
+        archive_ref: safeRef(b.archive_ref, SAFE_ARCHIVE_REF),
+        media_ref: safeRef(b.media_ref, SAFE_MEDIA_REF),
+        og_image_url: safeAssetUrl(b.og_image_url),
+        favicon_url: safeAssetUrl(b.favicon_url),
+        // NOT NULL columns — hand-trimmed exports may omit them.
+        is_read: b.is_read ?? 0,
+        title_locked: b.title_locked ?? 0,
+      };
+      insertBookmark.run(...BOOKMARK_COLUMNS.map((col) => sanitized[col] ?? null));
       progress.bookmarks_restored++;
       for (const topic of b.topics ?? []) {
         const topicId = topicIdByName.get(topic?.name) ?? (findTopic.get(topic?.name ?? "") as any)?.id;

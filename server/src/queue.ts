@@ -68,16 +68,29 @@ export function startWorker(
   );
   const finish = db.prepare("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?");
   const requeue = db.prepare("UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ?");
-  const reclaim = db.prepare(
-    "UPDATE jobs SET status = 'pending' WHERE status = 'running' AND updated_at < ?"
-  );
+  const listRunning = db.prepare("SELECT id, type, updated_at FROM jobs WHERE status = 'running'");
+  const reclaimOne = db.prepare("UPDATE jobs SET status = 'pending' WHERE id = ? AND status = 'running'");
 
   const now = () => Math.floor(Date.now() / 1000);
+
+  // The stale-lease cutoff must respect per-type timeouts: a restore allowed
+  // to run 30 minutes must not be reclaimed (and run twice concurrently)
+  // after the default 10.
+  function leaseSecondsFor(type: string): number {
+    const spec = handlers[type];
+    const timeoutMs = !spec || typeof spec === "function" ? jobTimeoutMs : spec.timeoutMs;
+    return Math.max(LEASE_SECONDS, Math.ceil(timeoutMs / 1000) + 60);
+  }
 
   function tick() {
     // Reclaim leases from handlers that wedged while the process kept running
     // (no restart needed); idempotent handlers make the re-run safe.
-    const stale = reclaim.run(now() - LEASE_SECONDS).changes;
+    let stale = 0;
+    for (const job of listRunning.all() as { id: string; type: string; updated_at: number }[]) {
+      if (now() - job.updated_at > leaseSecondsFor(job.type)) {
+        stale += reclaimOne.run(job.id).changes;
+      }
+    }
     if (stale > 0) console.warn(`queue: reclaimed ${stale} stale running job(s)`);
     while (executor.size + executor.pending < concurrency * 2) {
       const job = claim.get(now()) as

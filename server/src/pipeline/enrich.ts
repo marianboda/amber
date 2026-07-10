@@ -5,7 +5,7 @@ import type { Config } from "../config.js";
 import { canonicalize, domainOf } from "../canonical.js";
 import { fetchPage } from "./fetcher.js";
 import { extractPage, type ExtractedPage } from "./extract.js";
-import { scrubScripts } from "../routes/bookmarks.js";
+import { scrubScripts, archivePath } from "../routes/bookmarks.js";
 import { enrichWithLLM, type Enrichment } from "./llm.js";
 import { isYouTube, fetchOEmbed, enrichYouTubeWithGemini } from "./youtube.js";
 import { cacheAssets } from "./assets.js";
@@ -13,8 +13,10 @@ import { archiveFallback } from "./archive-fallback.js";
 
 function readArchive(dataDir: string, archiveRef: string | null): string | null {
   if (!archiveRef) return null;
+  const file = archivePath(dataDir, archiveRef);
+  if (!file) return null;
   try {
-    return fs.readFileSync(path.join(dataDir, archiveRef), "utf8");
+    return fs.readFileSync(file, "utf8");
   } catch {
     return null;
   }

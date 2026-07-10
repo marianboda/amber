@@ -98,4 +98,21 @@ describe("offline queue", () => {
     expect(await flushOfflineQueue()).toBe(0);
     expect(await offlineQueueSize()).toBe(0);
   });
+
+  it("keeps the queue on recoverable failures (bad token, server errors, unconfigured)", async () => {
+    configure();
+    await enqueueOffline({ url: "https://keep.test/1", saved_from: "extension" });
+    for (const status of [401, 429, 503]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "nope" }), { status }))
+      );
+      expect(await flushOfflineQueue()).toBe(0);
+      expect(await offlineQueueSize()).toBe(1);
+    }
+    // Unconfigured (user cleared options): also keep.
+    delete storageData.token;
+    expect(await flushOfflineQueue()).toBe(0);
+    expect(await offlineQueueSize()).toBe(1);
+  });
 });

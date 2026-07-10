@@ -212,6 +212,99 @@ describe("restore round trip", () => {
   });
 });
 
+describe("pass-6 fixes", () => {
+  it("sanitizes hostile refs in restored metadata", async () => {
+    const dirS = fs.mkdtempSync(path.join(os.tmpdir(), "amber-sanitize-"));
+    const dbS = openDb(path.join(dirS, "test.sqlite"));
+    try {
+      const evil = {
+        version: 1,
+        topics: [],
+        bookmarks: [
+          {
+            id: "evil-1",
+            url: "https://e.test/x",
+            canonical_url: "https://e.test/x",
+            saved_at: 1000,
+            archive_ref: "../../../etc/hosts",
+            media_ref: "../secrets.bin",
+            og_image_url: "/assets/../../db.sqlite",
+            favicon_url: "https://ok.test/favicon.ico",
+          },
+          {
+            id: "good-1",
+            url: "https://e.test/y",
+            canonical_url: "https://e.test/y",
+            saved_at: 1000,
+            archive_ref: "archives/good-1.html",
+            og_image_url: "/assets/thumbs/good-1.png",
+          },
+        ],
+      };
+      fs.mkdirSync(path.join(dirS, "tmp"), { recursive: true });
+      fs.writeFileSync(path.join(dirS, "tmp", "evil.json"), JSON.stringify(evil));
+      const jobId = enqueueJob(dbS, "restore", { file: "tmp/evil.json", filename: "e.json" });
+      await runRestore(dbS, dirS, { file: "tmp/evil.json", filename: "e.json" }, jobId);
+      const evilRow = dbS.prepare("SELECT * FROM bookmarks WHERE id = 'evil-1'").get() as any;
+      expect(evilRow.archive_ref).toBeNull();
+      expect(evilRow.media_ref).toBeNull();
+      expect(evilRow.og_image_url).toBeNull();
+      expect(evilRow.favicon_url).toBe("https://ok.test/favicon.ico");
+      const goodRow = dbS.prepare("SELECT * FROM bookmarks WHERE id = 'good-1'").get() as any;
+      expect(goodRow.archive_ref).toBe("archives/good-1.html");
+      expect(goodRow.og_image_url).toBe("/assets/thumbs/good-1.png");
+    } finally {
+      dbS.close();
+      fs.rmSync(dirS, { recursive: true, force: true });
+    }
+  });
+
+  it("archivePath refuses refs that resolve outside archives/", async () => {
+    const { archivePath } = await import("../src/routes/bookmarks.js");
+    expect(archivePath("/data", "archives/x.html")).toBe("/data/archives/x.html");
+    expect(archivePath("/data", "../etc/passwd")).toBeNull();
+    expect(archivePath("/data", "archives/../amber.sqlite")).toBeNull();
+    expect(archivePath("/data", "assets/thumbs/x.png")).toBeNull();
+  });
+
+  it("extraction leaves no temp files and recovers from a stale one", async () => {
+    // Reuse the round-trip zip: stale .restoretmp from a "crashed" run must be
+    // replaced by a complete file.
+    const created = await (
+      await app.request("/bookmarks", json({ url: "https://tmpfix.test/a" }))
+    ).json();
+    db.prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?").run(
+      `archives/${created.id}.html`,
+      created.id
+    );
+    fs.mkdirSync(path.join(dir, "archives"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "archives", `${created.id}.html`), "<html>full copy</html>");
+    const zipBytes = Buffer.from(await (await app.request("/export?format=zip")).arrayBuffer());
+
+    const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), "amber-tmpfix-"));
+    const db5 = openDb(path.join(dir5, "test.sqlite"));
+    try {
+      // Simulate the crash artifact.
+      fs.mkdirSync(path.join(dir5, "archives"), { recursive: true });
+      fs.writeFileSync(path.join(dir5, "archives", `${created.id}.html.restoretmp`), "trunc");
+      fs.mkdirSync(path.join(dir5, "tmp"), { recursive: true });
+      fs.writeFileSync(path.join(dir5, "tmp", "b.zip"), zipBytes);
+      const jobId = enqueueJob(db5, "restore", { file: "tmp/b.zip", filename: "b.zip" });
+      await runRestore(db5, dir5, { file: "tmp/b.zip", filename: "b.zip" }, jobId);
+      expect(fs.readFileSync(path.join(dir5, "archives", `${created.id}.html`), "utf8")).toBe(
+        "<html>full copy</html>"
+      );
+      const leftovers = fs
+        .readdirSync(path.join(dir5, "archives"))
+        .filter((f) => f.endsWith(".restoretmp") && f.startsWith(created.id));
+      expect(leftovers).toHaveLength(0);
+    } finally {
+      db5.close();
+      fs.rmSync(dir5, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("trash", () => {
   it("moves deleted bookmarks and their files to trash, purged after 30 days", async () => {
     const created = await (

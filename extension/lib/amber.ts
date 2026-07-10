@@ -38,6 +38,17 @@ export class OfflineError extends Error {
   }
 }
 
+// Server responded with an error — carries the status so the queue can tell
+// recoverable conditions (bad token, overload) from permanent rejections.
+export class HttpError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+  }
+}
+
 export interface SaveResult {
   id: string;
   duplicate?: boolean;
@@ -64,7 +75,7 @@ export async function saveBookmark(args: SaveArgs): Promise<SaveResult> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}) as any);
-    throw new Error(body.error ?? `HTTP ${res.status}`);
+    throw new HttpError(res.status, body.error ?? `HTTP ${res.status}`);
   }
   return res.json();
 }
@@ -89,9 +100,11 @@ export async function enqueueOffline(args: SaveArgs): Promise<number> {
   return queue.length;
 }
 
-// Drains the queue front-to-back; stops at the first offline failure (server
-// still down). Server-side rejections (4xx) drop the item — retrying can't fix
-// those. Returns how many saves went through.
+// Drains the queue front-to-back. Recoverable conditions (offline, missing
+// config, bad token, throttling, server errors) stop the drain and KEEP the
+// queue — the user can fix the token and nothing is lost. Only permanent
+// validation rejections (invalid URL etc.) drop an item. Returns how many
+// saves went through.
 export async function flushOfflineQueue(): Promise<number> {
   const { amber_queue } = (await browser.storage.local.get("amber_queue")) as {
     amber_queue?: QueuedSave[];
@@ -105,9 +118,13 @@ export async function flushOfflineQueue(): Promise<number> {
       await saveBookmark(item.args);
       flushed++;
       queue = queue.slice(1);
-    } catch (err) {
-      if (err instanceof OfflineError) break;
-      queue = queue.slice(1); // rejected by the server — drop, don't loop
+    } catch (err: any) {
+      const recoverable =
+        err instanceof OfflineError ||
+        String(err?.message).includes("not configured") ||
+        (err instanceof HttpError && (err.status === 401 || err.status === 403 || err.status === 429 || err.status >= 500));
+      if (recoverable) break;
+      queue = queue.slice(1); // permanently rejected — drop, don't loop
     }
   }
   await browser.storage.local.set({ amber_queue: queue });

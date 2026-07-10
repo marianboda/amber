@@ -28,6 +28,13 @@ export function ftsQuery(q: string): string | null {
   return terms.map((t) => `"${t}"*`).join(" ");
 }
 
+// Resolve an archive_ref strictly inside dataDir/archives — the ref comes from
+// the DB, and restored metadata is untrusted input (belt to restore's braces).
+export function archivePath(dataDir: string, ref: string): string | null {
+  const file = path.resolve(dataDir, ref);
+  return file.startsWith(path.resolve(dataDir, "archives") + path.sep) ? file : null;
+}
+
 export function scrubScripts(html: string): string {
   return html
     .replace(/<script\b[\s\S]*?<\/script\s*>/gi, "")
@@ -295,8 +302,8 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
     // Archive + cached thumb are keyed by bookmark id; favicons are shared by
     // domain and stay. Move (don't delete) so restore-from-trash keeps them.
     if (row.archive_ref) {
-      const file = path.join(config.dataDir, row.archive_ref);
-      if (fs.existsSync(file)) fs.renameSync(file, path.join(trashDir, path.basename(file)));
+      const file = archivePath(config.dataDir, row.archive_ref);
+      if (file && fs.existsSync(file)) fs.renameSync(file, path.join(trashDir, path.basename(file)));
     }
     if (row.og_image_url?.startsWith("/assets/thumbs/")) {
       const file = path.join(config.dataDir, "assets", "thumbs", path.basename(row.og_image_url));
@@ -355,8 +362,8 @@ export function bookmarkRoutes(db: Database.Database, config: Config): Hono {
       | { archive_ref: string | null }
       | undefined;
     if (!row?.archive_ref) return c.json({ error: "no archive" }, 404);
-    const file = path.join(config.dataDir, row.archive_ref);
-    if (!fs.existsSync(file)) return c.json({ error: "archive file missing" }, 404);
+    const file = archivePath(config.dataDir, row.archive_ref);
+    if (!file || !fs.existsSync(file)) return c.json({ error: "archive file missing" }, 404);
     c.header("Content-Type", "text/html; charset=utf-8");
     // No script execution even if something slipped through the scrubs.
     c.header("Content-Security-Policy", "sandbox; script-src 'none'");

@@ -51,8 +51,10 @@ Reviewed with `codex` (OpenAI CLI) in four independent read-only passes. All fin
 - **Pass 2 (`75a329d`)** — 7: non-http URLs (stored XSS); SSRF still bypassable via DNS rebinding; size limits buffered before reject; archive-overwrite race; redirect dedup dropped non-note fields; pagination skipped rows sharing `saved_at`; XFF spoofable.
 - **Pass 3 (`2ddfeb9`)** — 6: multipart OOM before size check; negative `limit` = unbounded; enrichment clobbered user-edited title; extension archived wrong page after navigation; no lease for wedged jobs; detail-panel stale-response race.
 - **Pass 4 (`b1bd001`)** — 5: monolith bypassed SSRF guard; timed-out job kept mutating; archive write failure misclassified as dead link; FTS write amplification; import status conflated same-filename imports.
+- **Pass 5 (batch 1, `9c44fa5`)** — 0 findings.
+- **Pass 6 (batches 2–7 combined)** — 5, all fixed with regression tests: per-type stale-lease cutoff (30-min restores were reclaimable at 10); restore extraction writes temp-then-rename (crash mid-stream left truncated archives that later runs treated as complete); restored `archive_ref`/`media_ref`/asset URLs sanitized + `archivePath()` guard at every use site (crafted export JSON could read/move files outside dataDir); zip-inflation caps (1GB metadata JSON, 512MB/entry, 20GB total); extension offline queue keeps recoverable failures (401/429/5xx/unconfigured) instead of silently dropping queued saves.
 
-A pass 5 would likely still surface a handful of marginal edge cases; the user's read and mine is that the code is solid enough to stop for a single-user tool. Resume reviews by telling codex which issues are already fixed.
+Resume reviews by telling codex which issues are already fixed.
 
 ## Key decisions made this session (beyond the design doc)
 

@@ -194,6 +194,31 @@ describe("queue timeout & lease reclaim", () => {
     expect(aborts.length).toBe(2);
   });
 
+  it("does not reclaim a long-timeout job type at the default lease age", async () => {
+    // A restore is allowed 30 minutes; a 700s-old lease must NOT be reclaimed
+    // (and run twice concurrently), while a default-lease enrich at 700s must.
+    const restoreRuns: string[] = [];
+    const stop = startWorker(
+      db,
+      {
+        enrich: async () => {},
+        restore: { handler: async (p) => void restoreRuns.push(p.file), timeoutMs: 30 * 60_000 },
+      },
+      { pollMs: 20 }
+    );
+    // Insert AFTER start so boot recovery doesn't reset them.
+    await new Promise((r) => setTimeout(r, 50));
+    const staleAt = Math.floor(Date.now() / 1000) - 700;
+    const restoreJob = enqueueJob(db, "restore", { file: "tmp/x.zip", filename: "x.zip" });
+    db.prepare("UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?").run(staleAt, restoreJob);
+    await new Promise((r) => setTimeout(r, 300));
+    await stop();
+    const job = db.prepare("SELECT status FROM jobs WHERE id = ?").get(restoreJob) as any;
+    expect(job.status).toBe("running"); // still leased to the (simulated) first runner
+    expect(restoreRuns).toHaveLength(0);
+    db.prepare("DELETE FROM jobs WHERE id = ?").run(restoreJob);
+  });
+
   it("reclaims a stale running lease", async () => {
     const runs: string[] = [];
     const jobId = enqueueJob(db, "enrich", { bookmark_id: "stale-lease" });

@@ -52,6 +52,15 @@ export async function streamToFileLimited(
   }
   const out = fs.createWriteStream(file);
   const reader = stream.getReader();
+  // The write stream opens its fd lazily — removing the file before that open
+  // completes lets the late open recreate/truncate it. Always close first.
+  const closeThenRemove = () =>
+    new Promise<void>((resolve) => {
+      out.close(() => {
+        fs.rmSync(file, { force: true });
+        resolve();
+      });
+    });
   let total = 0;
   try {
     for (;;) {
@@ -60,8 +69,7 @@ export async function streamToFileLimited(
       total += value.byteLength;
       if (total > limit) {
         reader.cancel().catch(() => {});
-        out.destroy();
-        fs.rmSync(file, { force: true });
+        await closeThenRemove();
         return null;
       }
       if (!out.write(value)) {
@@ -77,8 +85,7 @@ export async function streamToFileLimited(
     });
     return total;
   } catch (err) {
-    out.destroy();
-    fs.rmSync(file, { force: true });
+    await closeThenRemove();
     throw err;
   } finally {
     reader.releaseLock?.();
