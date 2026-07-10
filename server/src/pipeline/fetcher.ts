@@ -13,7 +13,9 @@ import { readStreamLimited } from "../http-util.js";
 
 const allowPrivate = process.env.AMBER_ALLOW_PRIVATE === "1";
 
-function isPrivateIp(ip: string): boolean {
+// Exported for tests — the SSRF guard is load-bearing and its edge cases
+// (CGNAT, IPv6-mapped v4, link-local) must stay covered.
+export function isPrivateIp(ip: string): boolean {
   if (net.isIPv6(ip)) {
     const lower = ip.toLowerCase();
     if (lower.startsWith("::ffff:")) return isPrivateIp(lower.slice(7));
@@ -37,7 +39,7 @@ function isPrivateIp(ip: string): boolean {
   );
 }
 
-async function assertPublicUrl(rawUrl: string): Promise<URL> {
+export async function assertPublicUrl(rawUrl: string): Promise<URL> {
   const url = new URL(rawUrl);
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error(`blocked: ${url.protocol} url`);

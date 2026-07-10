@@ -50,6 +50,7 @@ export function startWorker(
   {
     concurrency = 2,
     pollMs = 1000,
+    jobTimeoutMs = JOB_TIMEOUT_MS,
     onPermanentFailure = undefined as ((job: FailedJob) => void) | undefined,
   } = {}
 ): () => Promise<void> {
@@ -88,7 +89,7 @@ export function startWorker(
         try {
           if (!spec) throw new Error(`no handler for job type '${job.type}'`);
           const handler = typeof spec === "function" ? spec : spec.handler;
-          const timeoutMs = typeof spec === "function" ? JOB_TIMEOUT_MS : spec.timeoutMs;
+          const timeoutMs = typeof spec === "function" ? jobTimeoutMs : spec.timeoutMs;
           await runWithTimeout(
             (signal) => handler(JSON.parse(job.payload), job.id, signal),
             timeoutMs
