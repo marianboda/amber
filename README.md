@@ -9,7 +9,7 @@ See [`amber-design-doc.md`](amber-design-doc.md) for the full product/architectu
 ## Repository layout
 
 ```
-server/       Hono + TypeScript API, SQLite (FTS5), in-process job queue — source of truth
+server/       Hono + TypeScript API, Postgres (tsvector FTS), in-process job queue — source of truth
   src/        routes/, pipeline/ (fetch, extract, enrich, archive, assets), queue, auth, db
   migrations/ 001..006, applied automatically on boot
   test/       vitest (105 tests): unit + API + archive + queue + restore + pipeline
@@ -21,14 +21,24 @@ DEPLOY.md      Dokku setup on the existing server
 
 ## Architecture in one paragraph
 
-The **server is the source of truth**; all clients are thin (POST a save, GET lists/search). Every save inserts a bookmark immediately and enqueues an enrichment job — the API returns at once. A DB-backed job queue (`jobs` table + in-process poller) fetches the page, extracts text with Defuddle, calls one cheap LLM for gist/summary/type, caches the thumbnail + favicon locally, and stores a page archive. SQLite with FTS5 backs full-text search. Auth is a single bearer token. Provider is auto-detected from `OPENAI_API_KEY` / `GEMINI_API_KEY`; with no key it runs **metadata-only** (fetch + extract + search, no gist/summary).
+The **server is the source of truth**; all clients are thin (POST a save, GET lists/search). Every save inserts a bookmark immediately and enqueues an enrichment job — the API returns at once. A DB-backed job queue (`jobs` table + in-process poller) fetches the page, extracts text with Defuddle, calls one cheap LLM for gist/summary/type, caches the thumbnail + favicon locally, and stores a page archive. Postgres (a weighted `tsvector` column + GIN index) backs full-text search; archives and cached assets live on a disk mount. Auth is a single bearer token. Provider is auto-detected from `OPENAI_API_KEY` / `GEMINI_API_KEY`; with no key it runs **metadata-only** (fetch + extract + search, no gist/summary).
 
 ## Quick start (local, no LLM needed)
 
+Needs a Postgres to point at (metadata store). Any works; a throwaway in Docker:
+
+```sh
+docker run -d --name amber-pg -e POSTGRES_PASSWORD=dev -e POSTGRES_DB=amber -p 5455:5432 postgres:16
+```
+
 ```sh
 cd server && npm install
-AMBER_TOKEN=devtoken npm run dev          # http://localhost:3000
+AMBER_TOKEN=devtoken DATABASE_URL=postgres://postgres:dev@localhost:5455/amber \
+  npm run dev                             # http://localhost:3000
 ```
+
+Tests expect that same database (override with `TEST_DATABASE_URL`); each test
+file uses its own schema.
 
 Open `http://localhost:3000`, go to **Settings**, paste the token, Connect. Save links via Quick save, the bookmarklet (Settings), or `curl`:
 
@@ -61,7 +71,8 @@ Load unpacked from `extension/.output/chrome-mv3` (Chrome `chrome://extensions`,
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `AMBER_TOKEN` | **yes** | — | bearer token for all `/api` access |
-| `AMBER_DATA_DIR` | no | `./data` | SQLite + archives + cached assets live here |
+| `DATABASE_URL` | **yes** | — | Postgres connection string (metadata store) |
+| `AMBER_DATA_DIR` | no | `./data` (or `DATA_DIR`) | archives, cached assets, backups, trash live here |
 | `PORT` | no | `3000` | listen port |
 | `OPENAI_API_KEY` | no | — | selects OpenAI provider (gpt-4o-mini) |
 | `GEMINI_API_KEY` | no | — | selects Gemini provider (gemini-2.0-flash) **and** enables YouTube video summaries |
@@ -93,7 +104,7 @@ npm run build / build:firefox / dev / zip / test
 
 ## Deploy
 
-Dokku on the existing server; `git push dokku master` deploys. SQLite + archives live on a persistent storage mount so deploys never touch data. See [`DEPLOY.md`](DEPLOY.md).
+Dokku on the existing server; `git push dokku master` deploys. Metadata is in Postgres (`DATABASE_URL`); archives and cached assets live on a persistent storage mount so deploys never touch data. See [`DEPLOY.md`](DEPLOY.md).
 
 ## Status
 

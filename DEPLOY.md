@@ -4,10 +4,16 @@ One-time setup on the server:
 
 ```sh
 dokku apps:create amber
+# Postgres for metadata (bookmarks/topics/jobs). Either a dokku-postgres
+# service (`dokku postgres:create amber-db && dokku postgres:link amber-db amber`,
+# which sets DATABASE_URL) or an existing Postgres — set DATABASE_URL yourself.
+# The disk mount below still holds archives, cached assets, backups, and trash.
 # ensure-directory chowns to uid 32767 (herokuish) — the Dockerfile's runtime
 # user matches, so no root chown is needed on the host.
 dokku storage:ensure-directory amber
 dokku storage:mount amber /var/lib/dokku/data/storage/amber:/data
+# The container reads DATA_DIR or AMBER_DATA_DIR for the mount:
+dokku config:set amber AMBER_DATA_DIR=/data
 dokku config:set amber AMBER_TOKEN=<generate a long random token>
 # Behind Dokku's nginx the client IP arrives in X-Forwarded-For; without this
 # the auth brute-force limiter keys on nginx's IP and can lock everyone out.
@@ -33,16 +39,18 @@ git push dokku master
 
 ## Backup
 
-The SQLite database lives at `/data/amber.sqlite` inside the mount — deploys never touch it.
+Two layers of state: the **Postgres database** (metadata) and the **disk mount**
+(`/data/archives`, `/data/assets`).
 
-Do **not** back up by copying `amber.sqlite` while the server is running: the
-database runs in WAL mode, and a raw copy that misses the `-wal` file can be
-inconsistent. Safe options:
-
-- The server writes a consistent daily snapshot to `/data/backups/` (7 kept)
-  using SQLite's online backup API — sync that directory plus `/data/archives`
-  and `/data/assets` off the host.
-- On demand: `sqlite3 /var/lib/dokku/data/storage/amber/amber.sqlite ".backup /tmp/amber-backup.sqlite"`.
-- Full export including archives: `GET /api/export?format=zip` — which is also
-  the restore format: `POST /api/import` (Content-Type: application/zip)
-  rebuilds a fresh server from it, archives included.
+- **Primary: `GET /api/export?format=zip`** — a full backup of metadata *and*
+  archives in one file, and it's also the restore format:
+  `POST /api/import` (Content-Type: `application/zip`) rebuilds a fresh instance
+  from it. This is the recommended backup because it's the only one that
+  captures the archived pages too.
+- **Postgres:** back the database up at the Postgres host —
+  `dokku postgres:export <service> > amber-$(date +%F).dump` for a
+  dokku-postgres service, or `pg_dump` against DATABASE_URL. The app also writes
+  a daily `pg_dump` snapshot to `/data/backups/` when a matching `pg_dump`
+  client is on the container's PATH (best-effort; off by default in the slim
+  image).
+- **Disk mount:** sync `/data/archives` and `/data/assets` off the host.

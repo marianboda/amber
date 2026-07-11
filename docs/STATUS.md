@@ -68,6 +68,6 @@ Resume reviews by telling codex which issues are already fixed.
 ## Git / handover
 
 - Branch `master`, remote `origin` = `git@github.com:marianboda/amber.git`. Everything is pushed.
-- Not committed (gitignored): `node_modules/`, build output (`dist/`, `.output/`, `.wxt/`), `data/` (SQLite + archives + assets), `.env`, `.claude/`.
+- Not committed (gitignored): `node_modules/`, build output (`dist/`, `.output/`, `.wxt/`), `data/` (archives + assets + backups + trash), `.env`, `.claude/`. Metadata is in Postgres (`DATABASE_URL`), not in `data/`.
 - `server/data/` is local scratch — the real data dir on deploy is the Dokku storage mount.
 - No secrets are in the repo. Set `AMBER_TOKEN` and any LLM key via env on each machine.

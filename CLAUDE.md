@@ -8,7 +8,7 @@ Amber — a single-user permanent bookmark library. Server is the source of trut
 
 ## Three packages, one repo
 
-- `server/` — Hono + TypeScript, SQLite (better-sqlite3) with FTS5, in-process job queue. This is where almost all logic lives.
+- `server/` — Hono + TypeScript, Postgres (`pg`) with a `tsvector` FTS column, in-process job queue. This is where almost all logic lives. (Metadata is in Postgres via `DATABASE_URL`; archives/cached assets/backups/trash are files under `DATA_DIR`/`AMBER_DATA_DIR`. The data layer in `src/db.ts` is an async `prepare().get/all/run` adapter over a pg Pool with a `tx()` helper — call sites `await` it. Ported from SQLite; see `docs/POSTGRES.md`.)
 - `web/` — Svelte 5 (runes: `$state`/`$effect`/`$props`) + Vite. Built static, served by the server from `web/dist`. Talks only to `/api`.
 - `extension/` — WXT. Chrome MV3 + Firefox MV2 from one codebase. Captures a self-contained page snapshot (single-file-core) at save time.
 
