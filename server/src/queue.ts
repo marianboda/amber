@@ -1,5 +1,6 @@
 import type { Db } from "./db.js";
 import PQueue from "p-queue";
+import { randomUUID } from "node:crypto";
 
 export type JobHandler = (payload: any, jobId: string, signal: AbortSignal) => Promise<void>;
 // Handlers can carry a per-type timeout (e.g. restore walks a multi-GB zip and
@@ -56,18 +57,27 @@ export function startWorker(
   } = {}
 ): () => Promise<void> {
   const executor = new PQueue({ concurrency });
+  // Identifies this worker run. finish/requeue only touch a job still claimed
+  // by this run, so a job reclaimed after a timeout can't be overwritten by
+  // its original (now-stale) execution, and a second instance's boot can't
+  // disturb jobs this instance is actively running.
+  const runId = randomUUID();
 
   const claim = db.prepare(
-    `UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?
+    `UPDATE jobs SET status = 'running', attempts = attempts + 1, updated_at = ?, claimed_by = ?
      WHERE id = (SELECT id FROM jobs WHERE status = 'pending'
                  ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
      RETURNING id, type, payload, attempts, bookmark_id`
   );
-  const finish = db.prepare("UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ?");
-  const requeue = db.prepare("UPDATE jobs SET status = 'pending', updated_at = ? WHERE id = ?");
+  const finish = db.prepare(
+    "UPDATE jobs SET status = ?, error = ?, updated_at = ? WHERE id = ? AND claimed_by = ?"
+  );
+  const requeue = db.prepare(
+    "UPDATE jobs SET status = 'pending', updated_at = ?, claimed_by = NULL WHERE id = ? AND claimed_by = ?"
+  );
   const listRunning = db.prepare("SELECT id, type, updated_at FROM jobs WHERE status = 'running'");
   const reclaimOne = db.prepare(
-    "UPDATE jobs SET status = 'pending' WHERE id = ? AND status = 'running'"
+    "UPDATE jobs SET status = 'pending', claimed_by = NULL WHERE id = ? AND status = 'running'"
   );
 
   const now = () => Math.floor(Date.now() / 1000);
@@ -103,7 +113,7 @@ export function startWorker(
       if (stale > 0) console.warn(`queue: reclaimed ${stale} stale running job(s)`);
 
       while (!stopped && executor.size + executor.pending < concurrency * 2) {
-        const job = (await claim.get(now())) as
+        const job = (await claim.get(now(), runId)) as
           | { id: string; type: string; payload: string; attempts: number; bookmark_id: string | null }
           | undefined;
         if (!job) break;
@@ -114,15 +124,15 @@ export function startWorker(
             const handler = typeof spec === "function" ? spec : spec.handler;
             const timeoutMs = typeof spec === "function" ? jobTimeoutMs : spec.timeoutMs;
             await runWithTimeout((signal) => handler(JSON.parse(job.payload), job.id, signal), timeoutMs);
-            await finish.run("done", null, now(), job.id);
+            await finish.run("done", null, now(), job.id, runId);
           } catch (err: any) {
             const message = String(err?.message ?? err).slice(0, 500);
             if (job.attempts < MAX_ATTEMPTS) {
               console.warn(`job ${job.id} (${job.type}) failed, will retry: ${message}`);
-              await requeue.run(now(), job.id);
+              await requeue.run(now(), job.id, runId);
             } else {
               console.error(`job ${job.id} (${job.type}) failed permanently: ${message}`);
-              await finish.run("failed", message, now(), job.id);
+              await finish.run("failed", message, now(), job.id, runId);
               // Lets the app stamp dependent state terminal (e.g. a bookmark
               // whose enrichment kept timing out stays 'pending' otherwise and
               // would be rescued — and billed for — by maintenance forever).
@@ -142,18 +152,12 @@ export function startWorker(
     }
   }
 
-  // Boot recovery: reset any 'running' rows left by a previous process, then
-  // start polling.
-  const started = db
-    .prepare("UPDATE jobs SET status = 'pending' WHERE status = 'running'")
-    .run()
-    .then((r) => {
-      if (r.changes > 0) console.log(`queue: recovered ${r.changes} interrupted job(s)`);
-    })
-    .catch((err) => console.error("queue boot recovery failed:", err));
-
+  // No unconditional boot recovery: resetting every 'running' row on start
+  // would let a second instance (rolling deploy) requeue jobs the first is
+  // actively running. Instead, jobs left 'running' by a dead process are
+  // reclaimed once their lease expires (the periodic sweep in tick()).
   const interval = setInterval(() => void tick(), pollMs);
-  started.then(() => void tick());
+  void tick();
 
   // Stop claiming new jobs, then wait for in-flight ones — a graceful shutdown
   // must not close the DB under a handler mid-write.

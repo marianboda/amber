@@ -223,6 +223,28 @@ describe("import", () => {
     const job = (await db.prepare("SELECT payload FROM jobs WHERE id = ?").get(body.job_id)) as any;
     expect(JSON.parse(job.payload).enrich).toBe("metadata");
   });
+
+  it("an already-present URL in a chunk is skipped without losing the rest", async () => {
+    // Seed one bookmark, then import a chunk that includes its canonical URL
+    // plus new ones. The dup must count as duplicate (ON CONFLICT DO NOTHING)
+    // and NOT abort the transaction / drop the chunk.
+    await app.request("/bookmarks", json({ url: "https://dup.test/seed" }));
+    const items = [
+      { url: "https://dup.test/seed", title: "dup", addDate: null, folder: null },
+      { url: "https://dup.test/fresh-a", title: "A", addDate: null, folder: null },
+      { url: "https://dup.test/fresh-b", title: "B", addDate: null, folder: null },
+    ];
+    const jobId = await enqueueJob(db, "import", { filename: "dup.html", items });
+    await runImport(db, { filename: "dup.html", items }, jobId);
+    const progress = JSON.parse(
+      ((await db.prepare("SELECT progress FROM jobs WHERE id = ?").get(jobId)) as any).progress
+    );
+    expect(progress).toEqual({ total: 3, imported: 2, duplicates: 1, invalid: 0 });
+    const rows = (await db
+      .prepare("SELECT id FROM bookmarks WHERE import_batch = ?")
+      .all(jobId)) as any[];
+    expect(rows).toHaveLength(2);
+  });
 });
 
 describe("ops routes", () => {

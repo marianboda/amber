@@ -12,29 +12,72 @@ types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
 
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "migrations");
 
-// Translate better-sqlite3 '?' placeholders to Postgres '$n', skipping '?'
-// inside single-quoted string literals (doubled '' is an escaped quote).
+// Translate better-sqlite3 '?' placeholders to Postgres '$n'. Only '?' in
+// ordinary SQL is rewritten — '?' inside single-quoted strings, double-quoted
+// identifiers, dollar-quoted strings ($tag$…$tag$), line comments (-- …), and
+// block comments (/* … */) is left alone, so the adapter is safe for real
+// Postgres syntax, not just the queries in this repo.
 export function translate(sql: string): string {
   let out = "";
   let n = 0;
-  let inStr = false;
-  for (let i = 0; i < sql.length; i++) {
+  let i = 0;
+  const len = sql.length;
+  while (i < len) {
     const ch = sql[i];
-    if (ch === "'") {
-      if (inStr && sql[i + 1] === "'") {
-        out += "''";
-        i++;
-        continue;
-      }
-      inStr = !inStr;
+    const two = sql.slice(i, i + 2);
+    if (ch === "'" || ch === '"') {
+      // Quoted literal/identifier; doubled quote is an escape, not a terminator.
+      const q = ch;
       out += ch;
+      i++;
+      while (i < len) {
+        if (sql[i] === q && sql[i + 1] === q) {
+          out += q + q;
+          i += 2;
+          continue;
+        }
+        out += sql[i];
+        if (sql[i] === q) {
+          i++;
+          break;
+        }
+        i++;
+      }
       continue;
     }
-    if (ch === "?" && !inStr) {
+    if (two === "--") {
+      const nl = sql.indexOf("\n", i);
+      const end = nl === -1 ? len : nl;
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (two === "/*") {
+      const close = sql.indexOf("*/", i + 2);
+      const end = close === -1 ? len : close + 2;
+      out += sql.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "$") {
+      // Dollar-quoted string: $tag$ ... $tag$ (tag may be empty).
+      const tag = /^\$[A-Za-z0-9_]*\$/.exec(sql.slice(i));
+      if (tag) {
+        const open = tag[0];
+        const close = sql.indexOf(open, i + open.length);
+        const end = close === -1 ? len : close + open.length;
+        out += sql.slice(i, end);
+        i = end;
+        continue;
+      }
+    }
+    if (ch === "?") {
       out += "$" + ++n;
+      i++;
       continue;
     }
     out += ch;
+    i++;
   }
   return out;
 }
@@ -128,41 +171,58 @@ export async function openDb(databaseUrl: string, opts: { schema?: string } = {}
     },
   };
 
-  await migrate(db);
+  try {
+    await migrate(db);
+  } catch (err) {
+    // Don't leak the pool (idle connections + timers) when startup fails.
+    await pool.end().catch(() => {});
+    throw err;
+  }
   return db;
 }
 
+// Arbitrary constant identifying the amber migration lock (advisory locks are
+// keyed globally per database).
+const MIGRATION_LOCK_KEY = 4_021_970_111;
+
 async function migrate(db: Db) {
-  await db.exec(
-    "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)"
-  );
-  const rows = await db.prepare("SELECT name FROM schema_migrations").all();
-  const applied = new Set(rows.map((r) => r.name));
-  const files = fs
-    .readdirSync(MIGRATIONS_DIR)
-    .filter((f) => f.endsWith(".sql"))
-    .sort();
-  for (const file of files) {
-    if (applied.has(file)) continue;
-    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
-    // Migration files are multi-statement DDL — run on one client via the
-    // simple query protocol (extended/parameterized rejects multiple
-    // statements), wrapped in a transaction so a bad migration rolls back.
-    const client = await db.pool.connect();
-    try {
-      await client.query("BEGIN");
-      await client.query(sql);
-      await client.query("INSERT INTO schema_migrations (name, applied_at) VALUES ($1, $2)", [
-        file,
-        Math.floor(Date.now() / 1000),
-      ]);
-      await client.query("COMMIT");
-    } catch (err) {
-      await client.query("ROLLBACK").catch(() => {});
-      throw err;
-    } finally {
-      client.release();
+  // Hold a session advisory lock for the whole discover+apply so two instances
+  // booting at once (rolling deploy) can't both try to apply the same
+  // migration — the second blocks, then reads schema_migrations and skips.
+  const client = await db.pool.connect();
+  try {
+    await client.query("SELECT pg_advisory_lock($1)", [MIGRATION_LOCK_KEY]);
+    await client.query(
+      "CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)"
+    );
+    const { rows } = await client.query("SELECT name FROM schema_migrations");
+    const applied = new Set(rows.map((r) => r.name));
+    const files = fs
+      .readdirSync(MIGRATIONS_DIR)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    for (const file of files) {
+      if (applied.has(file)) continue;
+      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+      // Migration files are multi-statement DDL — simple query protocol
+      // (parameterized rejects multiple statements), wrapped in a transaction
+      // so a bad migration rolls back.
+      try {
+        await client.query("BEGIN");
+        await client.query(sql);
+        await client.query("INSERT INTO schema_migrations (name, applied_at) VALUES ($1, $2)", [
+          file,
+          Math.floor(Date.now() / 1000),
+        ]);
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      }
+      console.log(`migrated: ${file}`);
     }
-    console.log(`migrated: ${file}`);
+  } finally {
+    await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => {});
+    client.release();
   }
 }

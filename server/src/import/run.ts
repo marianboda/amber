@@ -60,35 +60,44 @@ export async function runImport(
   // inserted rows dedup away).
   const insertChunk = (chunk: ImportItem[]) =>
     db.tx(async (t) => {
-      const findExisting = t.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
+      // ON CONFLICT DO NOTHING RETURNING handles a concurrent-import dup on the
+      // unique canonical_url without raising — a raised 23505 mid-chunk would
+      // abort the whole Postgres transaction (25P02) and lose the chunk.
       const insert = t.prepare(
         `INSERT INTO bookmarks
            (id, url, canonical_url, title, domain, saved_at, saved_from, source_detail, topic_hint, import_batch)
-         VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)
+         ON CONFLICT (canonical_url) WHERE canonical_url IS NOT NULL DO NOTHING
+         RETURNING id`
       );
       for (const item of chunk) {
+        let canonical: string;
+        let domain: string;
         try {
-          const canonical = canonicalize(item.url);
-          if (await findExisting.get(canonical)) {
-            progress.duplicates++;
-          } else {
-            const id = randomUUID();
-            await insert.run(
-              id,
-              item.url,
-              canonical,
-              item.title,
-              domainOf(item.url),
-              item.addDate ?? now,
-              payload.filename,
-              item.folder,
-              jobId
-            );
-            await enqueueJob(t, "enrich", enrichPayload(id));
-            progress.imported++;
-          }
+          // Pure (no SQL): a bad URL here can't poison the transaction.
+          canonical = canonicalize(item.url);
+          domain = domainOf(item.url);
         } catch {
           progress.invalid++;
+          continue;
+        }
+        const id = randomUUID();
+        const inserted = (await insert.get(
+          id,
+          item.url,
+          canonical,
+          item.title,
+          domain,
+          item.addDate ?? now,
+          payload.filename,
+          item.folder,
+          jobId
+        )) as { id: string } | undefined;
+        if (inserted) {
+          await enqueueJob(t, "enrich", enrichPayload(id));
+          progress.imported++;
+        } else {
+          progress.duplicates++;
         }
       }
     });

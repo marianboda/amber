@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { canonicalize, domainOf } from "../src/canonical.js";
 import { ftsQuery, scrubScripts } from "../src/routes/bookmarks.js";
+import { translate } from "../src/db.js";
 import { parseNetscape, parseLines, detectFormat } from "../src/import/parse.js";
 import { dedupeItems } from "../src/import/run.js";
 import { isYouTube } from "../src/pipeline/youtube.js";
@@ -37,6 +38,25 @@ describe("ftsQuery", () => {
   it("returns null for whitespace/punctuation only", () => {
     expect(ftsQuery("   ")).toBeNull();
     expect(ftsQuery("!|()")).toBeNull();
+  });
+});
+
+describe("translate (? → $n)", () => {
+  it("numbers placeholders left to right", () => {
+    expect(translate("SELECT ? WHERE a = ? AND b = ?")).toBe("SELECT $1 WHERE a = $2 AND b = $3");
+  });
+  it("ignores ? inside single-quoted strings (incl. doubled '')", () => {
+    expect(translate("WHERE note = '' OR x = ? OR y = 'a?b'")).toBe(
+      "WHERE note = '' OR x = $1 OR y = 'a?b'"
+    );
+  });
+  it("ignores ? in double-quoted identifiers, comments, and dollar-quotes", () => {
+    expect(translate('SELECT "we?rd" , ? FROM t')).toBe('SELECT "we?rd" , $1 FROM t');
+    expect(translate("SELECT ? -- trailing ? comment\n, ?")).toBe(
+      "SELECT $1 -- trailing ? comment\n, $2"
+    );
+    expect(translate("SELECT ? /* ? */ , ?")).toBe("SELECT $1 /* ? */ , $2");
+    expect(translate("SELECT $$ a?b $$, ?")).toBe("SELECT $$ a?b $$, $1");
   });
 });
 

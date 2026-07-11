@@ -339,10 +339,14 @@ describe("pass-4 fixes", () => {
 });
 
 describe("queue", () => {
-  it("recovers running jobs on start and executes them", async () => {
+  it("reclaims a job left running by a dead process (stale lease) and runs it", async () => {
     const runs: string[] = [];
     const jobId = await enqueueJob(db, "enrich", { bookmark_id: "recover-me" });
-    await db.prepare("UPDATE jobs SET status='running' WHERE id = ?").run(jobId);
+    // Simulate a crash: left 'running' with an old lease (recovery is now
+    // lease-based, not an unconditional boot reset).
+    await db
+      .prepare("UPDATE jobs SET status='running', updated_at = ? WHERE id = ?")
+      .run(Math.floor(Date.now() / 1000) - 3600, jobId);
     const stop = startWorker(db, { enrich: async (p) => void runs.push(p.bookmark_id) }, { pollMs: 20 });
     await new Promise((r) => setTimeout(r, 500));
     await stop();
