@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Queryable } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -53,7 +53,7 @@ async function hasMonolith(): Promise<boolean> {
 // Returns true if an archive file was written, false otherwise. Never throws —
 // archival is best-effort and must not fail enrichment.
 export async function archiveFallback(
-  db: Database.Database,
+  db: Queryable,
   dataDir: string,
   bookmarkId: string,
   url: string,
@@ -92,10 +92,9 @@ export async function archiveFallback(
     if (!usedMonolith) html = injectBase(html, url);
 
     fs.writeFileSync(file, scrubScripts(html));
-    db.prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?").run(
-      `archives/${bookmarkId}.html`,
-      bookmarkId
-    );
+    await db
+      .prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?")
+      .run(`archives/${bookmarkId}.html`, bookmarkId);
     return true;
   } catch (err) {
     console.warn(`archive fallback failed for ${bookmarkId}: ${String(err)}`);

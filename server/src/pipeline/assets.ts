@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Queryable } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -26,10 +26,10 @@ function extensionFor(contentType: string, url: string): string {
 // are downloaded at enrich time and served locally, so cards survive link rot.
 // Local paths start with /assets/ and are stored in the same columns the UI
 // already reads; anything still http(s) simply wasn't cacheable.
-export async function cacheAssets(db: Database.Database, dataDir: string, bookmarkId: string) {
-  const row = db
+export async function cacheAssets(db: Queryable, dataDir: string, bookmarkId: string) {
+  const row = (await db
     .prepare("SELECT og_image_url, favicon_url, domain FROM bookmarks WHERE id = ?")
-    .get(bookmarkId) as
+    .get(bookmarkId)) as
     | { og_image_url: string | null; favicon_url: string | null; domain: string | null }
     | undefined;
   if (!row) return;
@@ -39,10 +39,9 @@ export async function cacheAssets(db: Database.Database, dataDir: string, bookma
     if (asset) {
       const file = `thumbs/${bookmarkId}.${extensionFor(asset.contentType, row.og_image_url)}`;
       writeAsset(dataDir, file, asset.bytes);
-      db.prepare("UPDATE bookmarks SET og_image_url = ? WHERE id = ?").run(
-        `/assets/${file}`,
-        bookmarkId
-      );
+      await db
+        .prepare("UPDATE bookmarks SET og_image_url = ? WHERE id = ?")
+        .run(`/assets/${file}`, bookmarkId);
     }
   }
 
@@ -56,11 +55,9 @@ export async function cacheAssets(db: Database.Database, dataDir: string, bookma
       if (!asset) return;
       writeAsset(dataDir, file, asset.bytes);
     }
-    db.prepare("UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url = ?").run(
-      `/assets/${file}`,
-      row.domain,
-      row.favicon_url
-    );
+    await db
+      .prepare("UPDATE bookmarks SET favicon_url = ? WHERE domain = ? AND favicon_url = ?")
+      .run(`/assets/${file}`, row.domain, row.favicon_url);
   }
 }
 

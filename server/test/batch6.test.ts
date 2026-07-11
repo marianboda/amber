@@ -10,6 +10,7 @@ import { isPrivateIp, assertPublicUrl } from "../src/pipeline/fetcher.js";
 import { bearerAuth } from "../src/auth.js";
 import { startWorker } from "../src/queue.js";
 import { enqueueJob } from "../src/jobs.js";
+import { TEST_DATABASE_URL } from "./pg.js";
 
 vi.mock("../src/pipeline/fetcher.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../src/pipeline/fetcher.js")>();
@@ -38,16 +39,17 @@ vi.mock("../src/pipeline/fetcher.js", async (importOriginal) => {
 });
 
 let dir: string;
-let db: ReturnType<typeof openDb>;
+let db: Awaited<ReturnType<typeof openDb>>;
 let config: Config;
+const SCHEMA = "test_batch6";
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "amber-test-"));
-  db = openDb(path.join(dir, "test.sqlite"));
+  db = await openDb(TEST_DATABASE_URL, { schema: SCHEMA });
   config = {
     port: 0,
     dataDir: dir,
-    dbPath: path.join(dir, "test.sqlite"),
+    databaseUrl: TEST_DATABASE_URL,
     authToken: "t",
     llm: { provider: "none", apiKey: "", model: "" },
     geminiApiKey: "",
@@ -55,8 +57,9 @@ beforeAll(() => {
   };
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await db.pool.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+  await db.end();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -112,42 +115,48 @@ describe("enrichment pipeline (mocked fetch)", () => {
     const { enrichBookmark } = await import("../src/pipeline/enrich.js");
     const now = Math.floor(Date.now() / 1000);
     // Owner already in the library with its own note.
-    db.prepare(
-      `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, note, enrich_status)
-       VALUES ('owner', 'https://owner.test/final', 'https://owner.test/final', 'owner.test', ?, 'owner note', 'done')`
-    ).run(now);
+    await db
+      .prepare(
+        `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, note, enrich_status)
+         VALUES ('owner', 'https://owner.test/final', 'https://owner.test/final', 'owner.test', ?, 'owner note', 'done')`
+      )
+      .run(now);
     // Newcomer that will redirect onto the owner; carries note, read flag, user topic.
-    db.prepare(
-      `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, note, is_read, enrich_status)
-       VALUES ('newcomer', 'https://redirects-to-owner.test/x', 'https://redirects-to-owner.test/x', 'redirects-to-owner.test', ?, 'newcomer note', 1, 'pending')`
-    ).run(now);
-    db.prepare("INSERT INTO topics (id, name) VALUES ('t-dev', 'dev')").run();
-    db.prepare(
-      "INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES ('newcomer', 't-dev', 0)"
-    ).run();
+    await db
+      .prepare(
+        `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, note, is_read, enrich_status)
+         VALUES ('newcomer', 'https://redirects-to-owner.test/x', 'https://redirects-to-owner.test/x', 'redirects-to-owner.test', ?, 'newcomer note', 1, 'pending')`
+      )
+      .run(now);
+    await db.prepare("INSERT INTO topics (id, name) VALUES ('t-dev', 'dev')").run();
+    await db
+      .prepare("INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES ('newcomer', 't-dev', 0)")
+      .run();
 
     await enrichBookmark(db, config, "newcomer");
 
-    expect(db.prepare("SELECT id FROM bookmarks WHERE id = 'newcomer'").get()).toBeUndefined();
-    const owner = db.prepare("SELECT * FROM bookmarks WHERE id = 'owner'").get() as any;
+    expect(await db.prepare("SELECT id FROM bookmarks WHERE id = 'newcomer'").get()).toBeUndefined();
+    const owner = (await db.prepare("SELECT * FROM bookmarks WHERE id = 'owner'").get()) as any;
     expect(owner.note).toContain("owner note");
     expect(owner.note).toContain("newcomer note");
     expect(owner.is_read).toBe(1);
-    const topics = db
+    const topics = (await db
       .prepare("SELECT topic_id, by_ai FROM bookmark_topics WHERE bookmark_id = 'owner'")
-      .all() as any[];
+      .all()) as any[];
     expect(topics).toEqual([{ topic_id: "t-dev", by_ai: 0 }]);
   });
 
   it("completes a normal page and stores text + reader html", async () => {
     const now = Math.floor(Date.now() / 1000);
     const { enrichBookmark } = await import("../src/pipeline/enrich.js");
-    db.prepare(
-      `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, enrich_status)
-       VALUES ('plain', 'https://plain.test/a', 'https://plain.test/a', 'plain.test', ?, 'pending')`
-    ).run(now);
+    await db
+      .prepare(
+        `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, enrich_status)
+         VALUES ('plain', 'https://plain.test/a', 'https://plain.test/a', 'plain.test', ?, 'pending')`
+      )
+      .run(now);
     await enrichBookmark(db, config, "plain");
-    const row = db.prepare("SELECT * FROM bookmarks WHERE id = 'plain'").get() as any;
+    const row = (await db.prepare("SELECT * FROM bookmarks WHERE id = 'plain'").get()) as any;
     expect(row.enrich_status).toBe("done");
     expect(row.fetch_status).toBe("ok");
     expect(row.content_text).toContain("content of");
@@ -156,12 +165,14 @@ describe("enrichment pipeline (mocked fetch)", () => {
   it("keeps PDFs clean: no content_text, no archive, still done", async () => {
     const now = Math.floor(Date.now() / 1000);
     const { enrichBookmark } = await import("../src/pipeline/enrich.js");
-    db.prepare(
-      `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, enrich_status)
-       VALUES ('pdf', 'https://files.test/doc.pdf', 'https://files.test/doc.pdf', 'files.test', ?, 'pending')`
-    ).run(now);
+    await db
+      .prepare(
+        `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, enrich_status)
+         VALUES ('pdf', 'https://files.test/doc.pdf', 'https://files.test/doc.pdf', 'files.test', ?, 'pending')`
+      )
+      .run(now);
     await enrichBookmark(db, config, "pdf");
-    const row = db.prepare("SELECT * FROM bookmarks WHERE id = 'pdf'").get() as any;
+    const row = (await db.prepare("SELECT * FROM bookmarks WHERE id = 'pdf'").get()) as any;
     expect(row.enrich_status).toBe("done");
     expect(row.fetch_status).toBe("ok");
     expect(row.content_text).toBeNull();
@@ -172,7 +183,7 @@ describe("enrichment pipeline (mocked fetch)", () => {
 describe("queue timeout & lease reclaim", () => {
   it("aborts a wedged handler via signal and fails the job after retries", async () => {
     const aborts: boolean[] = [];
-    const jobId = enqueueJob(db, "enrich", { bookmark_id: "wedge" });
+    const jobId = await enqueueJob(db, "enrich", { bookmark_id: "wedge" });
     const stop = startWorker(
       db,
       {
@@ -184,11 +195,11 @@ describe("queue timeout & lease reclaim", () => {
             });
           }),
       },
-      { pollMs: 20, jobTimeoutMs: 80 }
+      { pollMs: 20, jobTimeoutMs: 120 }
     );
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise((r) => setTimeout(r, 900));
     await stop();
-    const job = db.prepare("SELECT status, attempts FROM jobs WHERE id = ?").get(jobId) as any;
+    const job = (await db.prepare("SELECT status, attempts FROM jobs WHERE id = ?").get(jobId)) as any;
     expect(job.status).toBe("failed");
     expect(job.attempts).toBe(2);
     expect(aborts.length).toBe(2);
@@ -207,35 +218,32 @@ describe("queue timeout & lease reclaim", () => {
       { pollMs: 20 }
     );
     // Insert AFTER start so boot recovery doesn't reset them.
-    await new Promise((r) => setTimeout(r, 50));
+    await new Promise((r) => setTimeout(r, 100));
     const staleAt = Math.floor(Date.now() / 1000) - 700;
-    const restoreJob = enqueueJob(db, "restore", { file: "tmp/x.zip", filename: "x.zip" });
-    db.prepare("UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?").run(staleAt, restoreJob);
+    const restoreJob = await enqueueJob(db, "restore", { file: "tmp/x.zip", filename: "x.zip" });
+    await db
+      .prepare("UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?")
+      .run(staleAt, restoreJob);
     await new Promise((r) => setTimeout(r, 300));
     await stop();
-    const job = db.prepare("SELECT status FROM jobs WHERE id = ?").get(restoreJob) as any;
+    const job = (await db.prepare("SELECT status FROM jobs WHERE id = ?").get(restoreJob)) as any;
     expect(job.status).toBe("running"); // still leased to the (simulated) first runner
     expect(restoreRuns).toHaveLength(0);
-    db.prepare("DELETE FROM jobs WHERE id = ?").run(restoreJob);
+    await db.prepare("DELETE FROM jobs WHERE id = ?").run(restoreJob);
   });
 
   it("reclaims a stale running lease", async () => {
     const runs: string[] = [];
-    const jobId = enqueueJob(db, "enrich", { bookmark_id: "stale-lease" });
+    const jobId = await enqueueJob(db, "enrich", { bookmark_id: "stale-lease" });
     // Simulate a wedged claim from long ago: running, updated_at far in the past.
-    db.prepare("UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?").run(
-      Math.floor(Date.now() / 1000) - 3600,
-      jobId
-    );
-    const stop = startWorker(
-      db,
-      { enrich: async (p) => void runs.push(p.bookmark_id) },
-      { pollMs: 20 }
-    );
-    await new Promise((r) => setTimeout(r, 300));
+    await db
+      .prepare("UPDATE jobs SET status = 'running', updated_at = ? WHERE id = ?")
+      .run(Math.floor(Date.now() / 1000) - 3600, jobId);
+    const stop = startWorker(db, { enrich: async (p) => void runs.push(p.bookmark_id) }, { pollMs: 20 });
+    await new Promise((r) => setTimeout(r, 400));
     await stop();
     expect(runs).toContain("stale-lease");
-    const job = db.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as any;
+    const job = (await db.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId)) as any;
     expect(job.status).toBe("done");
   });
 });

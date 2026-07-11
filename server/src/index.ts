@@ -22,7 +22,7 @@ import { runBackup } from "./backup.js";
 import { opsRoutes } from "./routes/ops.js";
 
 const config = loadConfig();
-const db = openDb(config.dbPath);
+const db = await openDb(config.databaseUrl);
 
 const stopWorker = startWorker(
   db,
@@ -40,26 +40,32 @@ const stopWorker = startWorker(
     // A permanently-failed enrichment must surface as a failed bookmark:
     // leaving it 'pending' would strand the UI shimmer and make the
     // maintenance sweep re-enqueue (and re-bill) it forever.
-    onPermanentFailure: (job) => {
+    onPermanentFailure: async (job) => {
       if (job.type === "enrich" && job.bookmark_id) {
-        db.prepare(
-          "UPDATE bookmarks SET enrich_status = 'failed' WHERE id = ? AND enrich_status = 'pending'"
-        ).run(job.bookmark_id);
+        await db
+          .prepare(
+            "UPDATE bookmarks SET enrich_status = 'failed' WHERE id = ? AND enrich_status = 'pending'"
+          )
+          .run(job.bookmark_id);
       }
     },
   }
 );
 
-function maintenance() {
-  const rescued = runMaintenance(db, config.dataDir);
-  if (rescued) console.log(`maintenance: rescued ${rescued} orphaned enrichment(s)`);
+async function maintenance() {
+  try {
+    const rescued = await runMaintenance(db, config.dataDir);
+    if (rescued) console.log(`maintenance: rescued ${rescued} orphaned enrichment(s)`);
+  } catch (err) {
+    console.error("maintenance failed:", err);
+  }
 }
-maintenance();
-const maintenanceTimer = setInterval(maintenance, 60_000);
+await maintenance();
+const maintenanceTimer = setInterval(() => void maintenance(), 60_000);
 
 // Daily consistent DB snapshot (runBackup no-ops when today's exists).
 function backup() {
-  runBackup(db, config.dataDir)
+  runBackup(config.databaseUrl, config.dataDir)
     .then((file) => file && console.log(`backup: wrote ${file}`))
     .catch((err) => console.error("backup failed:", err));
 }
@@ -73,9 +79,9 @@ app.onError((err, c) => {
   return c.json({ error: "internal error" }, 500);
 });
 
-app.get("/health", (c) => {
+app.get("/health", async (c) => {
   try {
-    db.prepare("SELECT 1").get();
+    await db.prepare("SELECT 1").get();
     return c.json({ ok: true });
   } catch (err) {
     console.error("health check failed:", err);
@@ -139,7 +145,7 @@ if (webDist) {
 }
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
-  console.log(`amber server listening on :${info.port}, db at ${config.dbPath}`);
+  console.log(`amber server listening on :${info.port} (postgres)`);
 });
 
 // Graceful shutdown: stop claiming jobs, let in-flight ones finish (they're
@@ -155,7 +161,7 @@ async function shutdown(sig: string) {
   // Don't wait forever on a wedged handler — its job re-runs on next boot.
   await Promise.race([stopWorker(), new Promise((r) => setTimeout(r, 10_000))]);
   try {
-    db.close();
+    await db.end();
   } catch (err) {
     console.error("db close failed:", err);
   }

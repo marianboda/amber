@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Db } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -83,7 +83,7 @@ export interface RestoreProgress {
 // assets). Idempotent: existing ids/canonical URLs and existing files are
 // skipped, so a crashed restore can simply re-run.
 export async function runRestore(
-  db: Database.Database,
+  db: Db,
   dataDir: string,
   payload: RestorePayload,
   jobId: string,
@@ -102,12 +102,12 @@ export async function runRestore(
   if (isZip) {
     const json = await extractZip(file, dataDir, progress, signal);
     if (json === null) throw new Error("backup zip has no amber-export.json");
-    restoreMetadata(db, json, progress);
+    await restoreMetadata(db, json, progress);
   } else {
-    restoreMetadata(db, JSON.parse(fs.readFileSync(file, "utf8")), progress);
+    await restoreMetadata(db, JSON.parse(fs.readFileSync(file, "utf8")), progress);
   }
 
-  db.prepare("UPDATE jobs SET progress = ? WHERE id = ?").run(JSON.stringify(progress), jobId);
+  await db.prepare("UPDATE jobs SET progress = ? WHERE id = ?").run(JSON.stringify(progress), jobId);
   fs.rmSync(file, { force: true }); // staged upload no longer needed
 }
 
@@ -215,33 +215,33 @@ function extractZip(
   });
 }
 
-function restoreMetadata(db: Database.Database, data: any, progress: RestoreProgress) {
+async function restoreMetadata(db: Db, data: any, progress: RestoreProgress) {
   if (!data || data.version !== 1 || !Array.isArray(data.bookmarks)) {
     throw new Error("not an amber export (expected version 1 with a bookmarks array)");
   }
 
   const topicIdByName = new Map<string, string>();
-  const findTopic = db.prepare("SELECT id FROM topics WHERE name = ?");
-  const insertTopic = db.prepare("INSERT INTO topics (id, name, color) VALUES (?, ?, ?)");
-  const findById = db.prepare("SELECT id FROM bookmarks WHERE id = ?");
-  const findByCanonical = db.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
-  const insertBookmark = db.prepare(
-    `INSERT INTO bookmarks (${BOOKMARK_COLUMNS.join(",")})
-     VALUES (${BOOKMARK_COLUMNS.map(() => "?").join(",")})`
-  );
-  const linkTopic = db.prepare(
-    "INSERT OR IGNORE INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES (?, ?, ?)"
-  );
+  await db.tx(async (t) => {
+    const findTopic = t.prepare("SELECT id FROM topics WHERE name = ?");
+    const insertTopic = t.prepare("INSERT INTO topics (id, name, color) VALUES (?, ?, ?)");
+    const findById = t.prepare("SELECT id FROM bookmarks WHERE id = ?");
+    const findByCanonical = t.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
+    const insertBookmark = t.prepare(
+      `INSERT INTO bookmarks (${BOOKMARK_COLUMNS.join(",")})
+       VALUES (${BOOKMARK_COLUMNS.map(() => "?").join(",")})`
+    );
+    const linkTopic = t.prepare(
+      "INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai) VALUES (?, ?, ?) ON CONFLICT DO NOTHING"
+    );
 
-  const run = db.transaction(() => {
     for (const topic of data.topics ?? []) {
       if (!topic?.name) continue;
-      const existing = findTopic.get(topic.name) as { id: string } | undefined;
+      const existing = (await findTopic.get(topic.name)) as { id: string } | undefined;
       if (existing) {
         topicIdByName.set(topic.name, existing.id);
       } else {
         const id = typeof topic.id === "string" ? topic.id : crypto.randomUUID();
-        insertTopic.run(id, topic.name, topic.color ?? null);
+        await insertTopic.run(id, topic.name, topic.color ?? null);
         topicIdByName.set(topic.name, id);
         progress.topics_restored++;
       }
@@ -254,11 +254,11 @@ function restoreMetadata(db: Database.Database, data: any, progress: RestoreProg
       }
       // First-seen wins, same as every other save path: an id or canonical
       // URL already in the library keeps its existing row.
-      if (findById.get(b.id) || (b.canonical_url && findByCanonical.get(b.canonical_url))) {
+      if ((await findById.get(b.id)) || (b.canonical_url && (await findByCanonical.get(b.canonical_url)))) {
         progress.bookmarks_skipped++;
         continue;
       }
-      const sanitized = {
+      const sanitized: Record<string, unknown> = {
         ...b,
         archive_ref: safeRef(b.archive_ref, SAFE_ARCHIVE_REF),
         media_ref: safeRef(b.media_ref, SAFE_MEDIA_REF),
@@ -267,14 +267,16 @@ function restoreMetadata(db: Database.Database, data: any, progress: RestoreProg
         // NOT NULL columns — hand-trimmed exports may omit them.
         is_read: b.is_read ?? 0,
         title_locked: b.title_locked ?? 0,
+        enrich_status: b.enrich_status ?? "pending",
+        fetch_status: b.fetch_status ?? "pending",
       };
-      insertBookmark.run(...BOOKMARK_COLUMNS.map((col) => sanitized[col] ?? null));
+      await insertBookmark.run(...BOOKMARK_COLUMNS.map((col) => sanitized[col] ?? null));
       progress.bookmarks_restored++;
       for (const topic of b.topics ?? []) {
-        const topicId = topicIdByName.get(topic?.name) ?? (findTopic.get(topic?.name ?? "") as any)?.id;
-        if (topicId) linkTopic.run(b.id, topicId, topic.by_ai ?? 0);
+        const topicId =
+          topicIdByName.get(topic?.name) ?? ((await findTopic.get(topic?.name ?? "")) as any)?.id;
+        if (topicId) await linkTopic.run(b.id, topicId, topic.by_ai ?? 0);
       }
     }
   });
-  run();
 }

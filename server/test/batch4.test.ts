@@ -8,18 +8,20 @@ import type { Config } from "../src/config.js";
 import { bookmarkRoutes } from "../src/routes/bookmarks.js";
 import { decodeHtml } from "../src/pipeline/fetcher.js";
 import { injectBase } from "../src/pipeline/archive-fallback.js";
+import { TEST_DATABASE_URL } from "./pg.js";
 
 let dir: string;
-let db: ReturnType<typeof openDb>;
+let db: Awaited<ReturnType<typeof openDb>>;
 let app: Hono;
+const SCHEMA = "test_batch4";
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "amber-test-"));
-  db = openDb(path.join(dir, "test.sqlite"));
+  db = await openDb(TEST_DATABASE_URL, { schema: SCHEMA });
   const config: Config = {
     port: 0,
     dataDir: dir,
-    dbPath: path.join(dir, "test.sqlite"),
+    databaseUrl: TEST_DATABASE_URL,
     authToken: "t",
     llm: { provider: "none", apiKey: "", model: "" },
     geminiApiKey: "",
@@ -34,7 +36,7 @@ beforeAll(() => {
   );
   // Older row matches in the TITLE, newer row only deep in content — relevance
   // must put the title hit first despite recency.
-  insert.run(
+  await insert.run(
     "old-title-hit",
     "https://a.test/rust-book",
     "https://a.test/rust-book",
@@ -43,7 +45,7 @@ beforeAll(() => {
     "The Rust Programming Language",
     "a book about systems programming"
   );
-  insert.run(
+  await insert.run(
     "new-content-hit",
     "https://b.test/misc",
     "https://b.test/misc",
@@ -54,8 +56,9 @@ beforeAll(() => {
   );
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await db.pool.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+  await db.end();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

@@ -6,18 +6,20 @@ import path from "node:path";
 import { openDb } from "../src/db.js";
 import type { Config } from "../src/config.js";
 import { bookmarkRoutes } from "../src/routes/bookmarks.js";
+import { TEST_DATABASE_URL } from "./pg.js";
 
 let dir: string;
-let db: ReturnType<typeof openDb>;
+let db: Awaited<ReturnType<typeof openDb>>;
 let app: Hono;
+const SCHEMA = "test_batch3";
 
 beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "amber-test-"));
-  db = openDb(path.join(dir, "test.sqlite"));
+  db = await openDb(TEST_DATABASE_URL, { schema: SCHEMA });
   const config: Config = {
     port: 0,
     dataDir: dir,
-    dbPath: path.join(dir, "test.sqlite"),
+    databaseUrl: TEST_DATABASE_URL,
     authToken: "t",
     llm: { provider: "none", apiKey: "", model: "" },
     geminiApiKey: "",
@@ -30,13 +32,14 @@ beforeAll(async () => {
     `INSERT INTO bookmarks (id, url, canonical_url, domain, saved_at, enrich_status)
      VALUES (?, ?, ?, ?, ?, 'done')`
   );
-  insert.run("b1", "https://one.test/a", "https://one.test/a", "one.test", 1000);
-  insert.run("b2", "https://two.test/b", "https://two.test/b", "two.test", 2000);
-  insert.run("b3", "https://one.test/c", "https://one.test/c", "one.test", 3000);
+  await insert.run("b1", "https://one.test/a", "https://one.test/a", "one.test", 1000);
+  await insert.run("b2", "https://two.test/b", "https://two.test/b", "two.test", 2000);
+  await insert.run("b3", "https://one.test/c", "https://one.test/c", "one.test", 3000);
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await db.pool.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+  await db.end();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 

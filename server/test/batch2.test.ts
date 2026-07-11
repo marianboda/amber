@@ -3,6 +3,8 @@ import { Hono } from "hono";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { openDb } from "../src/db.js";
 import type { Config } from "../src/config.js";
 import { bookmarkRoutes } from "../src/routes/bookmarks.js";
@@ -14,13 +16,18 @@ import { runBackup } from "../src/backup.js";
 import { purgeTrash } from "../src/maintenance.js";
 import { enqueueJob } from "../src/jobs.js";
 import { streamToFileLimited } from "../src/http-util.js";
+import { TEST_DATABASE_URL } from "./pg.js";
 
+const execFileAsync = promisify(execFile);
+
+type Db = Awaited<ReturnType<typeof openDb>>;
 let dir: string;
-let db: ReturnType<typeof openDb>;
+let db: Db;
 let app: Hono;
 let config: Config;
+const SCHEMA = "test_batch2";
 
-function makeApp(database: ReturnType<typeof openDb>, dataDir: string, cfg: Config): Hono {
+function makeApp(database: Db, dataDir: string, cfg: Config): Hono {
   const a = new Hono();
   a.route("/bookmarks", bookmarkRoutes(database, cfg));
   a.route("/topics", topicRoutes(database));
@@ -29,13 +36,26 @@ function makeApp(database: ReturnType<typeof openDb>, dataDir: string, cfg: Conf
   return a;
 }
 
-beforeAll(() => {
+// A throwaway isolated database (its own schema) for "fresh server" scenarios,
+// with a cleanup that drops the schema and closes the pool.
+async function openFresh(schema: string): Promise<{ db: Db; cleanup: () => Promise<void> }> {
+  const fresh = await openDb(TEST_DATABASE_URL, { schema });
+  return {
+    db: fresh,
+    cleanup: async () => {
+      await fresh.pool.query(`DROP SCHEMA ${schema} CASCADE`);
+      await fresh.end();
+    },
+  };
+}
+
+beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "amber-test-"));
-  db = openDb(path.join(dir, "test.sqlite"));
+  db = await openDb(TEST_DATABASE_URL, { schema: SCHEMA });
   config = {
     port: 0,
     dataDir: dir,
-    dbPath: path.join(dir, "test.sqlite"),
+    databaseUrl: TEST_DATABASE_URL,
     authToken: "t",
     llm: { provider: "none", apiKey: "", model: "" },
     geminiApiKey: "",
@@ -44,8 +64,9 @@ beforeAll(() => {
   app = makeApp(db, dir, config);
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await db.pool.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+  await db.end();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -67,9 +88,11 @@ describe("restore round trip", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ topics: ["restoreme"], is_read: true, title: "Kept Title" }),
     });
-    db.prepare(
-      "UPDATE bookmarks SET gist = 'a gist', summary = 'a summary', enrich_status = 'done', archive_ref = ? WHERE id = ?"
-    ).run(`archives/${created.id}.html`, created.id);
+    await db
+      .prepare(
+        "UPDATE bookmarks SET gist = 'a gist', summary = 'a summary', enrich_status = 'done', archive_ref = ? WHERE id = ?"
+      )
+      .run(`archives/${created.id}.html`, created.id);
     fs.mkdirSync(path.join(dir, "archives"), { recursive: true });
     fs.writeFileSync(
       path.join(dir, "archives", `${created.id}.html`),
@@ -81,9 +104,9 @@ describe("restore round trip", () => {
     const zipBytes = Buffer.from(await zipRes.arrayBuffer());
     expect(zipBytes.subarray(0, 2).toString()).toBe("PK");
 
-    // Fresh server: new data dir, new DB.
+    // Fresh server: new data dir, new (isolated) DB.
     const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "amber-restore-"));
-    const db2 = openDb(path.join(dir2, "test.sqlite"));
+    const { db: db2, cleanup } = await openFresh("test_batch2_b");
     try {
       const app2 = makeApp(db2, dir2, { ...config, dataDir: dir2 });
       const upload = await app2.request("/import", {
@@ -94,11 +117,11 @@ describe("restore round trip", () => {
       expect(upload.status).toBe(202);
       const { job_id, restore } = await upload.json();
       expect(restore).toBe(true);
-      const job = db2.prepare("SELECT payload FROM jobs WHERE id = ?").get(job_id) as any;
+      const job = (await db2.prepare("SELECT payload FROM jobs WHERE id = ?").get(job_id)) as any;
       const payload = JSON.parse(job.payload);
       await runRestore(db2, dir2, payload, job_id);
 
-      const row = db2.prepare("SELECT * FROM bookmarks WHERE id = ?").get(created.id) as any;
+      const row = (await db2.prepare("SELECT * FROM bookmarks WHERE id = ?").get(created.id)) as any;
       expect(row).toBeDefined();
       expect(row.note).toBe("keep me");
       expect(row.title).toBe("Kept Title");
@@ -106,12 +129,12 @@ describe("restore round trip", () => {
       expect(row.is_read).toBe(1);
       expect(row.gist).toBe("a gist");
       expect(row.enrich_status).toBe("done");
-      const topics = db2
+      const topics = (await db2
         .prepare(
           `SELECT t.name, t.color, bt.by_ai FROM bookmark_topics bt
            JOIN topics t ON t.id = bt.topic_id WHERE bt.bookmark_id = ?`
         )
-        .all(created.id) as any[];
+        .all(created.id)) as any[];
       expect(topics).toEqual([{ name: "restoreme", color: "#123456", by_ai: 0 }]);
       expect(
         fs.readFileSync(path.join(dir2, "archives", `${created.id}.html`), "utf8")
@@ -127,17 +150,20 @@ describe("restore round trip", () => {
         body: zipBytes,
       });
       const againBody = await again.json();
-      const againJob = db2.prepare("SELECT payload FROM jobs WHERE id = ?").get(againBody.job_id) as any;
+      const againJob = (await db2
+        .prepare("SELECT payload FROM jobs WHERE id = ?")
+        .get(againBody.job_id)) as any;
       await runRestore(db2, dir2, JSON.parse(againJob.payload), againBody.job_id);
       const progress = JSON.parse(
-        (db2.prepare("SELECT progress FROM jobs WHERE id = ?").get(againBody.job_id) as any).progress
+        ((await db2.prepare("SELECT progress FROM jobs WHERE id = ?").get(againBody.job_id)) as any)
+          .progress
       );
       expect(progress.bookmarks_restored).toBe(0);
       expect(progress.bookmarks_skipped).toBeGreaterThanOrEqual(1);
-      const count = (db2.prepare("SELECT COUNT(*) AS n FROM bookmarks").get() as any).n;
+      const count = ((await db2.prepare("SELECT COUNT(*) AS n FROM bookmarks").get()) as any).n;
       expect(count).toBe(1);
     } finally {
-      db2.close();
+      await cleanup();
       fs.rmSync(dir2, { recursive: true, force: true });
     }
   });
@@ -147,7 +173,7 @@ describe("restore round trip", () => {
     const exportText = await exportRes.text();
 
     const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), "amber-restore-json-"));
-    const db3 = openDb(path.join(dir3, "test.sqlite"));
+    const { db: db3, cleanup } = await openFresh("test_batch2_json");
     try {
       const app3 = makeApp(db3, dir3, { ...config, dataDir: dir3 });
       const upload = await app3.request("/import", {
@@ -158,12 +184,12 @@ describe("restore round trip", () => {
       expect(upload.status).toBe(202);
       const { job_id, restore } = await upload.json();
       expect(restore).toBe(true);
-      const job = db3.prepare("SELECT payload FROM jobs WHERE id = ?").get(job_id) as any;
+      const job = (await db3.prepare("SELECT payload FROM jobs WHERE id = ?").get(job_id)) as any;
       await runRestore(db3, dir3, JSON.parse(job.payload), job_id);
-      const count = (db3.prepare("SELECT COUNT(*) AS n FROM bookmarks").get() as any).n;
+      const count = ((await db3.prepare("SELECT COUNT(*) AS n FROM bookmarks").get()) as any).n;
       expect(count).toBeGreaterThanOrEqual(1);
     } finally {
-      db3.close();
+      await cleanup();
       fs.rmSync(dir3, { recursive: true, force: true });
     }
   });
@@ -194,11 +220,11 @@ describe("restore round trip", () => {
     const evilZip = Buffer.concat(chunks);
 
     const dir4 = fs.mkdtempSync(path.join(os.tmpdir(), "amber-evil-"));
-    const db4 = openDb(path.join(dir4, "test.sqlite"));
+    const { db: db4, cleanup } = await openFresh("test_batch2_evil");
     try {
       fs.mkdirSync(path.join(dir4, "tmp"), { recursive: true });
       fs.writeFileSync(path.join(dir4, "tmp", "evil.zip"), evilZip);
-      const jobId = enqueueJob(db4, "restore", { file: "tmp/evil.zip", filename: "evil.zip" });
+      const jobId = await enqueueJob(db4, "restore", { file: "tmp/evil.zip", filename: "evil.zip" });
       // yauzl refuses traversal entries outright; either way no file may land.
       await expect(
         runRestore(db4, dir4, { file: "tmp/evil.zip", filename: "evil.zip" }, jobId)
@@ -206,7 +232,7 @@ describe("restore round trip", () => {
       expect(fs.existsSync(path.join(dir4, "evil.txt"))).toBe(false);
       expect(fs.existsSync(path.join(os.tmpdir(), "evil.txt"))).toBe(false);
     } finally {
-      db4.close();
+      await cleanup();
       fs.rmSync(dir4, { recursive: true, force: true });
     }
   });
@@ -215,7 +241,7 @@ describe("restore round trip", () => {
 describe("pass-6 fixes", () => {
   it("sanitizes hostile refs in restored metadata", async () => {
     const dirS = fs.mkdtempSync(path.join(os.tmpdir(), "amber-sanitize-"));
-    const dbS = openDb(path.join(dirS, "test.sqlite"));
+    const { db: dbS, cleanup } = await openFresh("test_batch2_sanitize");
     try {
       const evil = {
         version: 1,
@@ -243,18 +269,18 @@ describe("pass-6 fixes", () => {
       };
       fs.mkdirSync(path.join(dirS, "tmp"), { recursive: true });
       fs.writeFileSync(path.join(dirS, "tmp", "evil.json"), JSON.stringify(evil));
-      const jobId = enqueueJob(dbS, "restore", { file: "tmp/evil.json", filename: "e.json" });
+      const jobId = await enqueueJob(dbS, "restore", { file: "tmp/evil.json", filename: "e.json" });
       await runRestore(dbS, dirS, { file: "tmp/evil.json", filename: "e.json" }, jobId);
-      const evilRow = dbS.prepare("SELECT * FROM bookmarks WHERE id = 'evil-1'").get() as any;
+      const evilRow = (await dbS.prepare("SELECT * FROM bookmarks WHERE id = 'evil-1'").get()) as any;
       expect(evilRow.archive_ref).toBeNull();
       expect(evilRow.media_ref).toBeNull();
       expect(evilRow.og_image_url).toBeNull();
       expect(evilRow.favicon_url).toBe("https://ok.test/favicon.ico");
-      const goodRow = dbS.prepare("SELECT * FROM bookmarks WHERE id = 'good-1'").get() as any;
+      const goodRow = (await dbS.prepare("SELECT * FROM bookmarks WHERE id = 'good-1'").get()) as any;
       expect(goodRow.archive_ref).toBe("archives/good-1.html");
       expect(goodRow.og_image_url).toBe("/assets/thumbs/good-1.png");
     } finally {
-      dbS.close();
+      await cleanup();
       fs.rmSync(dirS, { recursive: true, force: true });
     }
   });
@@ -273,23 +299,22 @@ describe("pass-6 fixes", () => {
     const created = await (
       await app.request("/bookmarks", json({ url: "https://tmpfix.test/a" }))
     ).json();
-    db.prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?").run(
-      `archives/${created.id}.html`,
-      created.id
-    );
+    await db
+      .prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?")
+      .run(`archives/${created.id}.html`, created.id);
     fs.mkdirSync(path.join(dir, "archives"), { recursive: true });
     fs.writeFileSync(path.join(dir, "archives", `${created.id}.html`), "<html>full copy</html>");
     const zipBytes = Buffer.from(await (await app.request("/export?format=zip")).arrayBuffer());
 
     const dir5 = fs.mkdtempSync(path.join(os.tmpdir(), "amber-tmpfix-"));
-    const db5 = openDb(path.join(dir5, "test.sqlite"));
+    const { db: db5, cleanup } = await openFresh("test_batch2_tmpfix");
     try {
       // Simulate the crash artifact.
       fs.mkdirSync(path.join(dir5, "archives"), { recursive: true });
       fs.writeFileSync(path.join(dir5, "archives", `${created.id}.html.restoretmp`), "trunc");
       fs.mkdirSync(path.join(dir5, "tmp"), { recursive: true });
       fs.writeFileSync(path.join(dir5, "tmp", "b.zip"), zipBytes);
-      const jobId = enqueueJob(db5, "restore", { file: "tmp/b.zip", filename: "b.zip" });
+      const jobId = await enqueueJob(db5, "restore", { file: "tmp/b.zip", filename: "b.zip" });
       await runRestore(db5, dir5, { file: "tmp/b.zip", filename: "b.zip" }, jobId);
       expect(fs.readFileSync(path.join(dir5, "archives", `${created.id}.html`), "utf8")).toBe(
         "<html>full copy</html>"
@@ -299,7 +324,7 @@ describe("pass-6 fixes", () => {
         .filter((f) => f.endsWith(".restoretmp") && f.startsWith(created.id));
       expect(leftovers).toHaveLength(0);
     } finally {
-      db5.close();
+      await cleanup();
       fs.rmSync(dir5, { recursive: true, force: true });
     }
   });
@@ -310,16 +335,15 @@ describe("trash", () => {
     const created = await (
       await app.request("/bookmarks", json({ url: "https://trash.test/x", note: "bye" }))
     ).json();
-    db.prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?").run(
-      `archives/${created.id}.html`,
-      created.id
-    );
+    await db
+      .prepare("UPDATE bookmarks SET archive_ref = ? WHERE id = ?")
+      .run(`archives/${created.id}.html`, created.id);
     fs.mkdirSync(path.join(dir, "archives"), { recursive: true });
     fs.writeFileSync(path.join(dir, "archives", `${created.id}.html`), "<html>trash me</html>");
 
     const res = await app.request(`/bookmarks/${created.id}`, { method: "DELETE" });
     expect(res.status).toBe(200);
-    expect(db.prepare("SELECT id FROM bookmarks WHERE id = ?").get(created.id)).toBeUndefined();
+    expect(await db.prepare("SELECT id FROM bookmarks WHERE id = ?").get(created.id)).toBeUndefined();
     const trashJson = path.join(dir, "trash", `${created.id}.json`);
     const trashHtml = path.join(dir, "trash", `${created.id}.html`);
     expect(fs.existsSync(trashJson)).toBe(true);
@@ -340,26 +364,44 @@ describe("trash", () => {
 });
 
 describe("backup", () => {
-  it("writes a consistent daily snapshot and rotates old ones", async () => {
-    const file = await runBackup(db, dir, 2);
+  it("writes a consistent daily pg_dump snapshot and rotates old ones", async () => {
+    // pg_dump must be on PATH; if not (bare CI), the feature is a no-op and
+    // there's nothing to assert.
+    let hasPgDump = true;
+    try {
+      await execFileAsync("pg_dump", ["--version"], { timeout: 5000 });
+    } catch {
+      hasPgDump = false;
+    }
+    if (!hasPgDump) {
+      console.warn("backup test skipped: pg_dump not on PATH");
+      expect(await runBackup(TEST_DATABASE_URL, dir, 2)).toBeNull();
+      return;
+    }
+
+    const file = await runBackup(TEST_DATABASE_URL, dir, 2);
     expect(file).toBeTruthy();
-    const check = openDb(file!); // opens + migrates cleanly = valid DB
-    const n = (check.prepare("SELECT COUNT(*) AS n FROM bookmarks").get() as any).n;
-    check.close();
-    expect(n).toBeGreaterThanOrEqual(1);
+    expect(file!.endsWith(".dump")).toBe(true);
+    // Custom-format pg_dump files begin with the "PGDMP" magic.
+    const head = fs.readFileSync(file!).subarray(0, 5).toString("latin1");
+    expect(head).toBe("PGDMP");
+    expect(fs.statSync(file!).size).toBeGreaterThan(0);
     // Same day: no second snapshot.
-    expect(await runBackup(db, dir, 2)).toBeNull();
+    expect(await runBackup(TEST_DATABASE_URL, dir, 2)).toBeNull();
     // Rotation: seed fake old snapshots, keep=2 leaves the two newest.
     const backups = path.join(dir, "backups");
-    fs.writeFileSync(path.join(backups, "amber-2000-01-01.sqlite"), "x");
-    fs.writeFileSync(path.join(backups, "amber-2000-01-02.sqlite"), "x");
+    fs.writeFileSync(path.join(backups, "amber-2000-01-01.dump"), "x");
+    fs.writeFileSync(path.join(backups, "amber-2000-01-02.dump"), "x");
     fs.rmSync(file!, { force: true });
-    const again = await runBackup(db, dir, 2);
+    const again = await runBackup(TEST_DATABASE_URL, dir, 2);
     expect(again).toBeTruthy();
-    const left = fs.readdirSync(backups).filter((f) => f.endsWith(".sqlite")).sort();
+    const left = fs
+      .readdirSync(backups)
+      .filter((f) => f.endsWith(".dump"))
+      .sort();
     expect(left).toHaveLength(2);
     expect(left).toContain(path.basename(again!));
-    expect(left).not.toContain("amber-2000-01-01.sqlite");
+    expect(left).not.toContain("amber-2000-01-01.dump");
   });
 });
 

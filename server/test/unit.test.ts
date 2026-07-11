@@ -26,14 +26,17 @@ describe("canonicalize", () => {
 });
 
 describe("ftsQuery", () => {
-  it("quotes terms as prefix tokens", () => {
-    expect(ftsQuery("rust async")).toBe('"rust"* "async"*');
+  it("builds ANDed prefix lexemes for tsquery", () => {
+    expect(ftsQuery("rust async")).toBe("rust:* & async:*");
   });
-  it("neutralizes FTS operators and quotes", () => {
-    expect(ftsQuery('a OR "b')).toBe('"a"* "OR"* "b"*');
+  it("splits on punctuation so tsquery operators can't inject", () => {
+    expect(ftsQuery('a OR "b')).toBe("a:* & OR:* & b:*");
+    expect(ftsQuery("!(a|b)")).toBe("a:* & b:*");
+    expect(ftsQuery("unique-fts-token")).toBe("unique:* & fts:* & token:*");
   });
-  it("returns null for whitespace", () => {
+  it("returns null for whitespace/punctuation only", () => {
     expect(ftsQuery("   ")).toBeNull();
+    expect(ftsQuery("!|()")).toBeNull();
   });
 });
 

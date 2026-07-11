@@ -1,4 +1,4 @@
-import type Database from "better-sqlite3";
+import type { Db } from "../db.js";
 import { randomUUID } from "node:crypto";
 import { canonicalize, domainOf } from "../canonical.js";
 import { enqueueJob } from "../jobs.js";
@@ -43,70 +43,69 @@ export function dedupeItems(items: ImportItem[]): { items: ImportItem[]; dropped
 const CHUNK_SIZE = 200;
 
 export async function runImport(
-  db: Database.Database,
+  db: Db,
   payload: ImportPayload,
   jobId: string,
   signal?: AbortSignal
 ): Promise<void> {
   const progress = { total: payload.items.length, imported: 0, duplicates: 0, invalid: 0 };
-  const updateProgress = db.prepare("UPDATE jobs SET progress = ? WHERE id = ?");
-  const findExisting = db.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
-  const insert = db.prepare(
-    `INSERT INTO bookmarks
-       (id, url, canonical_url, title, domain, saved_at, saved_from, source_detail, topic_hint, import_batch)
-     VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)`
-  );
 
   const now = Math.floor(Date.now() / 1000);
   const enrichPayload = (id: string) =>
-    payload.enrich === "metadata"
-      ? { bookmark_id: id, mode: "metadata" }
-      : { bookmark_id: id };
+    payload.enrich === "metadata" ? { bookmark_id: id, mode: "metadata" } : { bookmark_id: id };
 
-  // One transaction per chunk: single WAL commit instead of two per item.
-  // The payload keeps its items untouched throughout, so a crash mid-import
-  // re-runs the job from the stored row (already-inserted rows dedup away).
-  const insertChunk = db.transaction((chunk: ImportItem[]) => {
-    for (const item of chunk) {
-      try {
-        const canonical = canonicalize(item.url);
-        if (findExisting.get(canonical)) {
-          progress.duplicates++;
-        } else {
-          const id = randomUUID();
-          insert.run(
-            id,
-            item.url,
-            canonical,
-            item.title,
-            domainOf(item.url),
-            item.addDate ?? now,
-            payload.filename,
-            item.folder,
-            jobId
-          );
-          enqueueJob(db, "enrich", enrichPayload(id));
-          progress.imported++;
+  // One transaction per chunk: a single commit for the whole chunk's inserts +
+  // enqueues (all on the tx connection). The payload keeps its items untouched
+  // throughout, so a crash mid-import re-runs from the stored row (already-
+  // inserted rows dedup away).
+  const insertChunk = (chunk: ImportItem[]) =>
+    db.tx(async (t) => {
+      const findExisting = t.prepare("SELECT id FROM bookmarks WHERE canonical_url = ?");
+      const insert = t.prepare(
+        `INSERT INTO bookmarks
+           (id, url, canonical_url, title, domain, saved_at, saved_from, source_detail, topic_hint, import_batch)
+         VALUES (?, ?, ?, ?, ?, ?, 'import', ?, ?, ?)`
+      );
+      for (const item of chunk) {
+        try {
+          const canonical = canonicalize(item.url);
+          if (await findExisting.get(canonical)) {
+            progress.duplicates++;
+          } else {
+            const id = randomUUID();
+            await insert.run(
+              id,
+              item.url,
+              canonical,
+              item.title,
+              domainOf(item.url),
+              item.addDate ?? now,
+              payload.filename,
+              item.folder,
+              jobId
+            );
+            await enqueueJob(t, "enrich", enrichPayload(id));
+            progress.imported++;
+          }
+        } catch {
+          progress.invalid++;
         }
-      } catch {
-        progress.invalid++;
       }
-    }
-  });
+    });
 
   for (let i = 0; i < payload.items.length; i += CHUNK_SIZE) {
     // Stop between chunks on job timeout — the re-run picks up where we left
     // off, and never races a still-running first attempt.
     if (signal?.aborted) throw new Error("import aborted");
-    insertChunk(payload.items.slice(i, i + CHUNK_SIZE));
-    updateProgress.run(JSON.stringify(progress), jobId);
-    // Yield between chunks so HTTP requests stay responsive during big imports.
-    await new Promise((resolve) => setImmediate(resolve));
+    await insertChunk(payload.items.slice(i, i + CHUNK_SIZE));
+    await db.prepare("UPDATE jobs SET progress = ? WHERE id = ?").run(JSON.stringify(progress), jobId);
   }
   // Finished: drop the item list, keep the row small.
-  db.prepare("UPDATE jobs SET payload = ?, progress = ? WHERE id = ?").run(
-    JSON.stringify({ filename: payload.filename, items: [], enrich: payload.enrich }),
-    JSON.stringify(progress),
-    jobId
-  );
+  await db
+    .prepare("UPDATE jobs SET payload = ?, progress = ? WHERE id = ?")
+    .run(
+      JSON.stringify({ filename: payload.filename, items: [], enrich: payload.enrich }),
+      JSON.stringify(progress),
+      jobId
+    );
 }

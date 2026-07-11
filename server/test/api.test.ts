@@ -13,18 +13,21 @@ import { parseNetscape } from "../src/import/parse.js";
 import { startWorker } from "../src/queue.js";
 import { enqueueJob } from "../src/jobs.js";
 
+import { TEST_DATABASE_URL } from "./pg.js";
+
 let dir: string;
-let db: ReturnType<typeof openDb>;
+let db: Awaited<ReturnType<typeof openDb>>;
 let app: Hono;
 let config: Config;
+const SCHEMA = "test_api";
 
-beforeAll(() => {
+beforeAll(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "amber-test-"));
-  db = openDb(path.join(dir, "test.sqlite"));
+  db = await openDb(TEST_DATABASE_URL, { schema: SCHEMA });
   config = {
     port: 0,
     dataDir: dir,
-    dbPath: path.join(dir, "test.sqlite"),
+    databaseUrl: TEST_DATABASE_URL,
     authToken: "t",
     llm: { provider: "none", apiKey: "", model: "" },
     geminiApiKey: "",
@@ -37,8 +40,9 @@ beforeAll(() => {
   app.route("/import", importRoutes(db, dir));
 });
 
-afterAll(() => {
-  db.close();
+afterAll(async () => {
+  await db.pool.query(`DROP SCHEMA ${SCHEMA} CASCADE`);
+  await db.end();
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -55,7 +59,7 @@ describe("bookmarks API", () => {
     const res = await app.request("/bookmarks", json({ url: "https://a.com/x?utm_source=t&p=1", note: "hello" }));
     expect(res.status).toBe(201);
     id = (await res.json()).id;
-    const jobs = db.prepare("SELECT * FROM jobs WHERE type='enrich'").all();
+    const jobs = await db.prepare("SELECT * FROM jobs WHERE type='enrich'").all();
     expect(jobs).toHaveLength(1);
   });
 
@@ -71,7 +75,7 @@ describe("bookmarks API", () => {
     const res = await app.request("/bookmarks", json({ url: "https://a.com/deferred", archive_coming: true }));
     expect(res.status).toBe(201);
     const deferredId = (await res.json()).id;
-    const jobs = db.prepare("SELECT * FROM jobs WHERE payload LIKE ?").all(`%${deferredId}%`);
+    const jobs = await db.prepare("SELECT * FROM jobs WHERE payload LIKE ?").all(`%${deferredId}%`);
     expect(jobs).toHaveLength(0);
   });
 
@@ -166,10 +170,10 @@ describe("codex review fixes", () => {
       body: JSON.stringify({ title: "My Title" }),
     });
     // Simulate an enrichment title write with the guard in place.
-    db.prepare(
-      "UPDATE bookmarks SET title = CASE WHEN title_locked = 1 THEN title ELSE ? END WHERE id = ?"
-    ).run("Fetched Title", created.id);
-    const row = db.prepare("SELECT title FROM bookmarks WHERE id = ?").get(created.id) as any;
+    await db
+      .prepare("UPDATE bookmarks SET title = CASE WHEN title_locked = 1 THEN title ELSE ? END WHERE id = ?")
+      .run("Fetched Title", created.id);
+    const row = (await db.prepare("SELECT title FROM bookmarks WHERE id = ?").get(created.id)) as any;
     expect(row.title).toBe("My Title");
   });
 
@@ -209,12 +213,14 @@ describe("codex review fixes", () => {
     await app.request("/topics", json({ name: "t-old" }));
     await app.request("/topics", json({ name: "t-new" }));
     await app.request("/topics", json({ name: "t-user" }));
-    applyTopics(db, created.id, ["t-old"]);
-    db.prepare(
-      `INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai)
-       SELECT ?, id, 0 FROM topics WHERE name = 't-user'`
-    ).run(created.id);
-    applyTopics(db, created.id, ["t-new"]);
+    await applyTopics(db, created.id, ["t-old"]);
+    await db
+      .prepare(
+        `INSERT INTO bookmark_topics (bookmark_id, topic_id, by_ai)
+         SELECT ?, id, 0 FROM topics WHERE name = 't-user'`
+      )
+      .run(created.id);
+    await applyTopics(db, created.id, ["t-new"]);
     const bookmark = await (await app.request(`/bookmarks/${created.id}`)).json();
     expect(bookmark.topics.map((t: any) => t.name).sort()).toEqual(["t-new", "t-user"]);
   });
@@ -228,7 +234,7 @@ describe("archive", () => {
     const html = `<html><head><title>T</title></head><body><script>evil()</script><p onclick="x()">${"content ".repeat(30)}</p></body></html>`;
     const put = await app.request(`/bookmarks/${created.id}/archive`, { method: "PUT", body: html });
     expect(put.status).toBe(200);
-    const jobs = db.prepare("SELECT * FROM jobs WHERE payload LIKE ?").all(`%${created.id}%`);
+    const jobs = await db.prepare("SELECT * FROM jobs WHERE payload LIKE ?").all(`%${created.id}%`);
     expect(jobs).toHaveLength(1);
     const got = await app.request(`/bookmarks/${created.id}/archive`);
     expect(got.status).toBe(200);
@@ -278,10 +284,10 @@ describe("export", () => {
 
   it("bulk retry re-enqueues failed enrichments", async () => {
     const created = await (await app.request("/bookmarks", json({ url: "https://a.com/failed1" }))).json();
-    db.prepare("UPDATE bookmarks SET enrich_status='failed' WHERE id = ?").run(created.id);
+    await db.prepare("UPDATE bookmarks SET enrich_status='failed' WHERE id = ?").run(created.id);
     const res = await (await app.request("/bookmarks/retry-failed", { method: "POST" })).json();
     expect(res.retried).toBeGreaterThanOrEqual(1);
-    const row = db.prepare("SELECT enrich_status FROM bookmarks WHERE id = ?").get(created.id) as any;
+    const row = (await db.prepare("SELECT enrich_status FROM bookmarks WHERE id = ?").get(created.id)) as any;
     expect(row.enrich_status).toBe("pending");
   });
 });
@@ -300,7 +306,9 @@ describe("pass-4 fixes", () => {
     const before = await (await app.request("/bookmarks?q=unique-fts-token")).json();
     expect(before.bookmarks.map((b: any) => b.id)).toContain(created.id);
     // a non-indexed column update (favicon) must not drop the FTS row
-    db.prepare("UPDATE bookmarks SET favicon_url = '/assets/favicons/x.ico' WHERE id = ?").run(created.id);
+    await db
+      .prepare("UPDATE bookmarks SET favicon_url = '/assets/favicons/x.ico' WHERE id = ?")
+      .run(created.id);
     const after = await (await app.request("/bookmarks?q=unique-fts-token")).json();
     expect(after.bookmarks.map((b: any) => b.id)).toContain(created.id);
   });
@@ -313,10 +321,12 @@ describe("pass-4 fixes", () => {
     const j2 = "job-batch-2";
     const now = Math.floor(Date.now() / 1000);
     for (const id of [j1, j2]) {
-      db.prepare(
-        `INSERT INTO jobs (id, type, payload, status, attempts, created_at, updated_at)
-         VALUES (?, 'import', ?, 'pending', 0, ?, ?)`
-      ).run(id, JSON.stringify({ filename: "dup.html", items }), now, now);
+      await db
+        .prepare(
+          `INSERT INTO jobs (id, type, payload, status, attempts, created_at, updated_at)
+           VALUES (?, 'import', ?, 'pending', 0, ?, ?)`
+        )
+        .run(id, JSON.stringify({ filename: "dup.html", items }), now, now);
       await runImport(db, { filename: "dup.html", items } as any, id);
     }
     const s1 = await (await app.request(`/import/${j1}`)).json();
@@ -331,22 +341,18 @@ describe("pass-4 fixes", () => {
 describe("queue", () => {
   it("recovers running jobs on start and executes them", async () => {
     const runs: string[] = [];
-    const jobId = enqueueJob(db, "enrich", { bookmark_id: "recover-me" });
-    db.prepare("UPDATE jobs SET status='running' WHERE id = ?").run(jobId);
-    const stop = startWorker(
-      db,
-      { enrich: async (p) => void runs.push(p.bookmark_id) },
-      { pollMs: 20 }
-    );
-    await new Promise((r) => setTimeout(r, 300));
-    stop();
+    const jobId = await enqueueJob(db, "enrich", { bookmark_id: "recover-me" });
+    await db.prepare("UPDATE jobs SET status='running' WHERE id = ?").run(jobId);
+    const stop = startWorker(db, { enrich: async (p) => void runs.push(p.bookmark_id) }, { pollMs: 20 });
+    await new Promise((r) => setTimeout(r, 500));
+    await stop();
     expect(runs).toContain("recover-me");
-    const job = db.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId) as any;
+    const job = (await db.prepare("SELECT status FROM jobs WHERE id = ?").get(jobId)) as any;
     expect(job.status).toBe("done");
   });
 
   it("marks failing jobs failed after retry", async () => {
-    const jobId = enqueueJob(db, "enrich", { bookmark_id: "boom" });
+    const jobId = await enqueueJob(db, "enrich", { bookmark_id: "boom" });
     const stop = startWorker(
       db,
       {
@@ -356,9 +362,11 @@ describe("queue", () => {
       },
       { pollMs: 20 }
     );
-    await new Promise((r) => setTimeout(r, 400));
-    stop();
-    const job = db.prepare("SELECT status, attempts, error FROM jobs WHERE id = ?").get(jobId) as any;
+    await new Promise((r) => setTimeout(r, 700));
+    await stop();
+    const job = (await db
+      .prepare("SELECT status, attempts, error FROM jobs WHERE id = ?")
+      .get(jobId)) as any;
     expect(job.status).toBe("failed");
     expect(job.attempts).toBe(2);
     expect(job.error).toContain("kaboom");

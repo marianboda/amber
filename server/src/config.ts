@@ -4,7 +4,7 @@ import path from "node:path";
 export interface Config {
   port: number;
   dataDir: string;
-  dbPath: string;
+  databaseUrl: string;
   authToken: string;
   llm: {
     provider: string; // openai|gemini|ollama
@@ -43,15 +43,22 @@ function resolveLlm(): Config["llm"] {
 }
 
 export function loadConfig(): Config {
-  const dataDir = process.env.AMBER_DATA_DIR ?? path.resolve("data");
+  // Archives, cached assets, backups, and trash live on disk regardless of the
+  // metadata database; DATA_DIR is the Dokku-provisioned mount, AMBER_DATA_DIR
+  // the local override.
+  const dataDir = process.env.AMBER_DATA_DIR ?? process.env.DATA_DIR ?? path.resolve("data");
   const authToken = process.env.AMBER_TOKEN ?? "";
   if (!authToken) {
     throw new Error("AMBER_TOKEN is required (bearer token for all API access)");
   }
+  const databaseUrl = process.env.DATABASE_URL ?? process.env.AMBER_DATABASE_URL ?? "";
+  if (!databaseUrl) {
+    throw new Error("DATABASE_URL is required (Postgres connection string)");
+  }
   return {
     port: Number(process.env.PORT ?? 3000),
     dataDir,
-    dbPath: path.join(dataDir, "amber.sqlite"),
+    databaseUrl,
     authToken,
     llm: resolveLlm(),
     geminiApiKey: process.env.GEMINI_API_KEY ?? "",

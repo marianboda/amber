@@ -1,23 +1,29 @@
 import { Hono } from "hono";
-import type Database from "better-sqlite3";
+import type { Db } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
 import { PassThrough, Readable } from "node:stream";
 import { ZipArchive } from "archiver";
 import { topicsForBookmarks } from "./topics.js";
 
-export function exportRoutes(db: Database.Database, dataDir: string): Hono {
+export function exportRoutes(db: Db, dataDir: string): Hono {
   const app = new Hono();
 
-  app.get("/", (c) => {
+  app.get("/", async (c) => {
     const format = c.req.query("format") ?? "json";
-    const bookmarks = db.prepare("SELECT * FROM bookmarks ORDER BY saved_at DESC").all() as any[];
-    const topicMap = topicsForBookmarks(db, bookmarks.map((b) => b.id));
+    const bookmarks = (await db
+      .prepare("SELECT * FROM bookmarks ORDER BY saved_at DESC")
+      .all()) as any[];
+    for (const b of bookmarks) delete b.fts; // don't export the tsvector blob
+    const topicMap = await topicsForBookmarks(
+      db,
+      bookmarks.map((b) => b.id)
+    );
     for (const b of bookmarks) b.topics = topicMap.get(b.id) ?? [];
 
     if (format === "zip") {
       // Full backup: metadata JSON + archived pages + cached assets, streamed.
-      const topics = db.prepare("SELECT * FROM topics ORDER BY name").all();
+      const topics = await db.prepare("SELECT * FROM topics ORDER BY name").all();
       const zip = new ZipArchive({ zlib: { level: 6 } });
       const out = new PassThrough();
       zip.pipe(out);
@@ -35,7 +41,7 @@ export function exportRoutes(db: Database.Database, dataDir: string): Hono {
     }
 
     if (format === "json") {
-      const topics = db.prepare("SELECT * FROM topics ORDER BY name").all();
+      const topics = await db.prepare("SELECT * FROM topics ORDER BY name").all();
       c.header("Content-Disposition", 'attachment; filename="amber-export.json"');
       return c.json({ version: 1, topics, bookmarks });
     }

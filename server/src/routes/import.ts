@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type Database from "better-sqlite3";
+import type { Db } from "../db.js";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,12 +20,12 @@ function looksLikeAmberExport(text: string): boolean {
   }
 }
 
-export function importRoutes(db: Database.Database, dataDir: string): Hono {
+export function importRoutes(db: Db, dataDir: string): Hono {
   const app = new Hono();
 
   // Stage an uploaded backup under tmp/ and hand it to the restore job.
-  const stageRestore = (name: string, filename: string) => {
-    const jobId = enqueueJob(db, "restore", { file: `tmp/${name}`, filename });
+  const stageRestore = async (name: string, filename: string) => {
+    const jobId = await enqueueJob(db, "restore", { file: `tmp/${name}`, filename });
     return { job_id: jobId, restore: true };
   };
 
@@ -44,7 +44,7 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
       );
       if (written === null) return c.json({ error: "backup too large (4GB max)" }, 413);
       if (written === 0) return c.json({ error: "empty upload" }, 400);
-      return c.json(stageRestore(name, "amber-backup.zip"), 202);
+      return c.json(await stageRestore(name, "amber-backup.zip"), 202);
     }
 
     if (Number(c.req.header("content-length") ?? 0) > MAX_IMPORT) {
@@ -74,7 +74,7 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
         const name = `restore-${randomUUID()}.zip`;
         fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
         fs.writeFileSync(path.join(dataDir, "tmp", name), bytes);
-        return c.json(stageRestore(name, filename), 202);
+        return c.json(await stageRestore(name, filename), 202);
       }
       text = bytes.toString("utf8");
     } else {
@@ -82,7 +82,7 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
         const name = `restore-${randomUUID()}.zip`;
         fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
         fs.writeFileSync(path.join(dataDir, "tmp", name), buffered);
-        return c.json(stageRestore(name, "amber-backup.zip"), 202);
+        return c.json(await stageRestore(name, "amber-backup.zip"), 202);
       }
       text = buffered.toString("utf8");
     }
@@ -94,7 +94,10 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
       const name = `restore-${randomUUID()}.json`;
       fs.mkdirSync(path.join(dataDir, "tmp"), { recursive: true });
       fs.writeFileSync(path.join(dataDir, "tmp", name), text);
-      return c.json(stageRestore(name, filename === "import" ? "amber-export.json" : filename), 202);
+      return c.json(
+        await stageRestore(name, filename === "import" ? "amber-export.json" : filename),
+        202
+      );
     }
 
     const parsed = detectFormat(text) === "netscape" ? parseNetscape(text) : parseLines(text);
@@ -104,18 +107,17 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
     // enrich=metadata: fetch/extract/archive per item but skip the LLM call —
     // lets a big first import run cheap, with LLM enrichment batched later via
     // POST /bookmarks/enrich-missing.
-    const jobId = enqueueJob(db, "import", { filename, items, enrich });
+    const jobId = await enqueueJob(db, "import", { filename, items, enrich });
     return c.json({ job_id: jobId, count: items.length, enrich }, 202);
   });
 
   // Recent import jobs — lets the UI resume progress after a page reload.
-  // Progress lives in its own column; payload.progress is the pre-005 fallback.
-  app.get("/", (c) => {
-    const jobs = db
+  app.get("/", async (c) => {
+    const jobs = (await db
       .prepare(
         "SELECT id, status, payload, progress, created_at FROM jobs WHERE type IN ('import','restore') ORDER BY created_at DESC LIMIT 10"
       )
-      .all() as {
+      .all()) as {
       id: string;
       status: string;
       payload: string;
@@ -136,12 +138,12 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
     });
   });
 
-  app.get("/:job_id", (c) => {
-    const job = db
+  app.get("/:job_id", async (c) => {
+    const job = (await db
       .prepare(
         "SELECT id, status, payload, progress, error FROM jobs WHERE id = ? AND type IN ('import','restore')"
       )
-      .get(c.req.param("job_id")) as
+      .get(c.req.param("job_id"))) as
       | {
           id: string;
           status: string;
@@ -157,12 +159,12 @@ export function importRoutes(db: Database.Database, dataDir: string): Hono {
     // Insert progress from the job itself; enrichment progress from the rows.
     // Scope by import_batch (the job id) so two same-filename imports don't
     // report each other's counts.
-    const enrichment = db
+    const enrichment = (await db
       .prepare(
         `SELECT enrich_status, COUNT(*) AS n FROM bookmarks
          WHERE import_batch = ? GROUP BY enrich_status`
       )
-      .all(job.id) as { enrich_status: string; n: number }[];
+      .all(job.id)) as { enrich_status: string; n: number }[];
     const enrich: Record<string, number> = {};
     for (const row of enrichment) enrich[row.enrich_status] = row.n;
 
