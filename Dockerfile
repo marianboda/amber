@@ -20,7 +20,10 @@ RUN npm run build && npm prune --omit=dev
 COPY --from=webbuild /app/web/dist /app/web/dist
 
 ENV NODE_ENV=production
-ENV AMBER_DATA_DIR=/data
+# Default mount point for archives/assets/backups/trash; the Dokku storage
+# mount and DATA_DIR/AMBER_DATA_DIR config point here too. Metadata is in
+# Postgres (DATABASE_URL), not on disk.
+ENV AMBER_DATA_DIR=/app/data
 EXPOSE 3000
 
 # Unprivileged runtime user with the uid Dokku's storage:ensure-directory
