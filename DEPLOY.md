@@ -22,8 +22,16 @@ dokku config:set amber AMBER_TRUST_PROXY=1
 # dokku config:set amber OPENAI_API_KEY=sk-...            # → gpt-4o-mini
 # dokku config:set amber GEMINI_API_KEY=...               # → gemini-2.0-flash + YouTube summaries
 # optional overrides: AMBER_LLM_PROVIDER, AMBER_LLM_MODEL, AMBER_LLM_BASE_URL (e.g. Ollama)
+# If the Postgres is another app on a private Docker network (not a
+# dokku-postgres service), attach amber to that network AT CREATE TIME so the
+# boot-time migration can resolve the DB host:
+#   dokku network:set amber initial-network <that-network>
+# Dockerfile apps may not get an automatic proxy port map — ensure nginx routes
+# :80 to the container's :3000:
+dokku ports:set amber http:80:3000
 dokku domains:set amber amber.example.com
-dokku letsencrypt:enable amber
+dokku letsencrypt:set amber email you@example.com
+dokku letsencrypt:enable amber   # needs :80 routing working first (ports above)
 # Archive uploads from the extension can be large (up to 300MB) and imports up
 # to 100MB; nginx's default limit is 1MB and would reject them:
 dokku nginx:set amber client-max-body-size 300m
